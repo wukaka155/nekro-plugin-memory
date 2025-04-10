@@ -1,112 +1,772 @@
-"""这是一个示例天气查询插件
-
-提供指定城市的天气查询功能。
-使用 wttr.in API 获取天气数据。
-"""
-
-from typing import Dict
+import asyncio
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List, Optional
 
 import httpx
-from nekro_agent.api.schemas import AgentCtx
-from nekro_agent.core import logger
-from nekro_agent.services.plugin.base import ConfigBase, NekroPlugin, SandboxMethodType
+from mem0 import Memory
 from pydantic import Field
 
-# TODO: 插件元信息，请修改为你的插件信息
+from nekro_agent.api.core import get_qdrant_config, logger
+from nekro_agent.api.schemas import AgentCtx
+from nekro_agent.core.config import ModelConfigGroup
+from nekro_agent.core.config import config as core_config
+from nekro_agent.services.agent.creator import OpenAIChatMessage
+from nekro_agent.services.agent.openai import gen_openai_chat_response
+from nekro_agent.services.plugin.base import ConfigBase, NekroPlugin, SandboxMethodType
+
+# 扩展元数据
 plugin = NekroPlugin(
-    name="天气查询插件",  # TODO: 插件名称
-    module_name="weather",  # TODO: 插件模块名 (如果要发布该插件，需要在 NekroAI 社区中唯一)
-    description="提供指定城市的天气查询功能",  # TODO: 插件描述
-    version="1.0.0",  # TODO: 插件版本
-    author="KroMiose",  # TODO: 插件作者
-    url="https://github.com/KroMiose/nekro-plugin-template",  # TODO: 插件仓库地址
+    name="记忆模块",
+    module_name="nekro_plugin_memory",
+    description="长期记忆管理系统,支持记忆的增删改查及语义搜索",
+    version="0.1.1",
+    author="Zaxpris",
+    url="https://github.com/zxjwzn/nekro-plugin-memory",
 )
 
 
-# TODO: 插件配置，根据需要修改
-@plugin.mount_config()
-class WeatherConfig(ConfigBase):
-    """天气查询配置"""
+# 在现有import后添加以下代码
+BASE62_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-    API_URL: str = Field(
-        default="https://wttr.in/",
-        title="天气API地址",
-        description="天气查询API的基础URL",
-    )
-    TIMEOUT: int = Field(
-        default=10,
-        title="请求超时时间",
-        description="API请求的超时时间(秒)",
-    )
+def encode_base62(number: int) -> str:
+    """将大整数编码为Base62字符串"""
+    if number == 0:
+        return BASE62_ALPHABET[0]
+    digits = []
+    while number > 0:
+        number, remainder = divmod(number, 62)
+        digits.append(BASE62_ALPHABET[remainder])
+    return "".join(reversed(digits))
 
+def decode_base62(encoded: str) -> int:
+    """将Base62字符串解码回大整数"""
+    number = 0
+    for char in encoded:
+        number = number * 62 + BASE62_ALPHABET.index(char)
+    return number
 
-# 获取配置实例
-config: WeatherConfig = plugin.get_config(WeatherConfig)
-
-
-@plugin.mount_sandbox_method(SandboxMethodType.AGENT, name="查询天气", description="查询指定城市的实时天气信息")
-async def query_weather(_ctx: AgentCtx, city: str) -> str:
-    """查询指定城市的实时天气信息。
-
-    Args:
-        city: 需要查询天气的城市名称，例如 "北京", "London"。
-
-    Returns:
-        str: 包含城市实时天气信息的字符串。查询失败时返回错误信息。
-
-    Example:
-        查询北京的天气:
-        query_weather(city="北京")
-        查询伦敦的天气:
-        query_weather(city="London")
-    """
+def encode_id(original_id: str) -> str:
+    """将UUID转换为短ID"""
     try:
-        async with httpx.AsyncClient(timeout=config.TIMEOUT) as client:
-            response = await client.get(f"{config.API_URL}{city}?format=j1")
-            response.raise_for_status()
-            data: Dict = response.json()
+        uuid_obj = uuid.UUID(original_id)
+        return encode_base62(uuid_obj.int)
+    except ValueError as err:
+        raise ValueError("无效的UUID格式") from err
 
-        # 提取需要的天气信息
-        # wttr.in 的 JSON 结构可能包含 current_condition 列表
-        if not data.get("current_condition"):
-            logger.warning(f"城市 '{city}' 的天气数据格式不符合预期，缺少 'current_condition'")
-            return f"未能获取到城市 '{city}' 的有效天气数据，请检查城市名称是否正确。"
+def decode_id(encoded_id: str) -> str:
+    """将短ID转换回原始UUID"""
+    try:
+        number = decode_base62(encoded_id)
+        return str(uuid.UUID(int=number))
+    except (ValueError, AttributeError) as err:
+        raise ValueError("无效的短ID格式") from err
+    
+def format_memories(results: List[Dict]) -> str:
+    """格式化记忆列表为字符串"""
+    if not results:
+        return "未找到任何记忆"
+    
+    formatted = []
+    for idx, mem in enumerate(results, 1):
+        metadata = mem.get("metadata", {})
+        created_at = mem.get("created_at", "未知时间")
+        score = mem.get("score", "暂无")
+        formatted.append(
+        f"{idx}. [ID: {encode_id(mem['id'])}]\n"  # 使用短ID
+        f"内容: {mem['memory']}\n"
+        f"元数据: {metadata}\n"
+        f"创建时间: {created_at}\n"
+        f"匹配度: {score}\n",
+    )
+    return "\n".join(formatted)
 
-        # 处理获取到的天气数据
-        current_condition = data["current_condition"][0]
-        temp_c = current_condition.get("temp_C")
-        feels_like_c = current_condition.get("FeelsLikeC")
-        humidity = current_condition.get("humidity")
-        weather_desc_list = current_condition.get("weatherDesc", [])
-        weather_desc = weather_desc_list[0].get("value") if weather_desc_list else "未知"
-        wind_speed_kmph = current_condition.get("windspeedKmph")
-        wind_dir = current_condition.get("winddir16Point")
-        visibility = current_condition.get("visibility")
-        pressure = current_condition.get("pressure")
+#根据模型名获取模型组配置项
+def get_model_group_info(model_name: str) -> ModelConfigGroup:
+    try:
+        return core_config.MODEL_GROUPS[model_name]
+    except KeyError as e:
+        raise ValueError(f"模型组 '{model_name}' 不存在，请确认配置正确") from e
 
-        # 格式化返回结果
-        result = (
-            f"城市: {city}\n"
-            f"天气状况: {weather_desc}\n"
-            f"温度: {temp_c}°C\n"
-            f"体感温度: {feels_like_c}°C\n"
-            f"湿度: {humidity}%\n"
-            f"风向: {wind_dir}\n"
-            f"风速: {wind_speed_kmph} km/h\n"
-            f"能见度: {visibility} km\n"
-            f"气压: {pressure} hPa"
+@plugin.mount_config()
+class MemoryConfig(ConfigBase):
+    """基础配置"""
+
+    MEMORY_MANAGE_MODEL: str = Field(
+        default="default",
+        title="记忆管理模型",
+        description="用于将传入的记忆内容简化整理的对话模型组",
+        json_schema_extra={"ref_model_groups": True, "required": True},
+    )
+    TEXT_EMBEDDING_MODEL: str = Field(
+        default="default",
+        title="向量嵌入模型",
+        description="用于将传入的记忆进行向量嵌入的嵌入模型组",
+        json_schema_extra={"ref_model_groups": True, "required": True},
+    )
+    TEXT_EMBEDDING_DIMENSION: int = Field(
+        default=1024,
+        title="嵌入维度",
+        description="嵌入维度",
+    )
+    SESSION_ISOLATION: bool = Field(
+        default=True,
+        title="记忆会话隔离",
+        description="开启后bot存储的记忆只对当前会话有效,在其他会话中无法获取",
+    )
+    AUTO_MEMORY_ENABLED: bool = Field(
+        default=True,
+        title="启用自动记忆检索",
+        description="启用后,系统将在对话开始时自动检索与当前对话相关的用户的所有记忆",
+    )
+    AUTO_MEMORY_SEARCH_LIMIT: int = Field(
+        default=5,
+        title="自动记忆检索数量上限",
+        description="自动检索时返回的记忆条数上限",
+    )
+    AUTO_MEMORY_CONTEXT_MESSAGE_COUNT: int = Field(
+        default=5,
+        title="上下文消息数",
+        description="可获取到的上下文消息数量",
+    )
+    AUTO_MEMORY_USE_TOPIC_SEARCH: bool = Field(
+        default=True,
+        title="启用话题搜索",
+        description="启用后,系统将使用LLM来找到最近聊天话题,并通过话题获取相关记忆,可能会延长响应时间",
+    )
+    TOPIC_CACHE_EXPIRE_SECONDS: int = Field(
+        default=60,
+        title="话题缓存时长",
+        description="系统将临时保留话题,超时后再重新总结",
+    )
+
+# 获取最新配置的函数
+def get_memory_config() -> MemoryConfig:
+    """获取最新的记忆模块配置"""
+    return plugin.get_config(MemoryConfig)
+
+# 初始化mem0客户端
+_mem0_instance = None
+_last_config_hash = None
+_thread_pool = ThreadPoolExecutor(max_workers=5)  # 创建一个线程池用于执行同步操作
+
+# 添加记忆注入缓存，避免短时间内重复执行
+_memory_inject_cache = {}
+
+# 异步创建Memory实例
+async def create_memory_async(config: Dict[str, Any]) -> Memory:
+    """将Memory.from_config包装成异步函数，避免阻塞事件循环"""
+    return await asyncio.get_running_loop().run_in_executor(
+        _thread_pool,
+        lambda: Memory.from_config(config),
+    )
+
+# 将同步方法包装成异步方法
+async def async_mem0_search(mem0, query: str, user_id: str):
+    """异步执行mem0.search，避免阻塞事件循环"""
+    return await asyncio.get_running_loop().run_in_executor(
+        _thread_pool, 
+        lambda: mem0.search(query=query, user_id=user_id),
+    )
+
+async def async_mem0_get_all(mem0, user_id: str):
+    """异步执行mem0.get_all，避免阻塞事件循环"""
+    return await asyncio.get_running_loop().run_in_executor(
+        _thread_pool, 
+        lambda: mem0.get_all(user_id=user_id),
+    )
+
+async def async_mem0_add(mem0, messages: str, user_id: str, metadata: Dict[str, Any]):
+    """异步执行mem0.add，避免阻塞事件循环"""
+    return await asyncio.get_running_loop().run_in_executor(
+        _thread_pool, 
+        lambda: mem0.add(messages=messages, user_id=user_id, metadata=metadata),
+    )
+
+async def async_mem0_update(mem0, memory_id: str, data: str):
+    """异步执行mem0.update，避免阻塞事件循环"""
+    return await asyncio.get_running_loop().run_in_executor(
+        _thread_pool, 
+        lambda: mem0.update(memory_id=memory_id, data=data),
+    )
+
+async def async_mem0_history(mem0, memory_id: str):
+    """异步执行mem0.history，避免阻塞事件循环"""
+    return await asyncio.get_running_loop().run_in_executor(
+        _thread_pool, 
+        lambda: mem0.history(memory_id=memory_id),
+    )
+
+async def get_mem0_client_async():
+    """异步获取mem0客户端实例"""
+    global _mem0_instance, _last_config_hash
+    memory_config = get_memory_config()  # 始终获取最新配置
+    qdrant_config = get_qdrant_config()
+        
+    # 计算当前配置的哈希值
+    current_config = {
+        "MEMORY_MANAGE_MODEL": memory_config.MEMORY_MANAGE_MODEL,
+        "TEXT_EMBEDDING_MODEL": memory_config.TEXT_EMBEDDING_MODEL,
+        "TEXT_EMBEDDING_DIMENSION": memory_config.TEXT_EMBEDDING_DIMENSION,
+        "llm_model_name": get_model_group_info(memory_config.MEMORY_MANAGE_MODEL).CHAT_MODEL,
+        "llm_api_key": get_model_group_info(memory_config.MEMORY_MANAGE_MODEL).API_KEY,
+        "llm_base_url": get_model_group_info(memory_config.MEMORY_MANAGE_MODEL).BASE_URL,
+        "embedder_model_name": get_model_group_info(memory_config.TEXT_EMBEDDING_MODEL).CHAT_MODEL,
+        "embedder_api_key": get_model_group_info(memory_config.TEXT_EMBEDDING_MODEL).API_KEY,
+        "embedder_base_url": get_model_group_info(memory_config.TEXT_EMBEDDING_MODEL).BASE_URL,
+        "qdrant_host": qdrant_config.host,
+        "qdrant_port": qdrant_config.port,
+        "qdrant_api_key": qdrant_config.api_key,
+    }
+    
+    # 验证字段不能为空字符串
+    errors = []
+    
+    if not current_config["llm_model_name"]:
+        errors.append(f"模型组 '{memory_config.MEMORY_MANAGE_MODEL}' 的CHAT_MODEL不能为空")
+    if not current_config["llm_api_key"]:
+        errors.append(f"模型组 '{memory_config.MEMORY_MANAGE_MODEL}' 的API_KEY不能为空")
+    if not current_config["llm_base_url"]:
+        errors.append(f"模型组 '{memory_config.MEMORY_MANAGE_MODEL}' 的BASE_URL不能为空")
+    if not current_config["embedder_model_name"]:
+        errors.append(f"模型组 '{memory_config.TEXT_EMBEDDING_MODEL}' 的CHAT_MODEL不能为空")
+    if not current_config["embedder_api_key"]:
+        errors.append(f"模型组 '{memory_config.TEXT_EMBEDDING_MODEL}' 的API_KEY不能为空")
+    if not current_config["embedder_base_url"]:
+        errors.append(f"模型组 '{memory_config.TEXT_EMBEDDING_MODEL}' 的BASE_URL不能为空")
+    
+    if errors:
+        error_message = "记忆模块配置错误：\n" + "\n".join([f"- {error}" for error in errors])
+        logger.error(error_message)
+        raise ValueError(error_message)
+    
+    
+    current_hash = hash(frozenset(current_config.items()))
+    
+    # 如果配置变了或者实例不存在，重新初始化
+    if _mem0_instance is None or current_hash != _last_config_hash:
+        # 重新构建配置
+        mem0_client_config = {
+            "vector_store": {
+                "provider": "qdrant",
+                "config": {
+                    "host": current_config["qdrant_host"],
+                    "port": current_config["qdrant_port"],
+                    "api_key": current_config["qdrant_api_key"],
+                    "collection_name": plugin.get_vector_collection_name(),
+                    "embedding_model_dims": current_config["TEXT_EMBEDDING_DIMENSION"],
+                },
+            },
+            "llm": {
+                "provider": "openai",
+                "config": {
+                    "api_key": current_config["llm_api_key"],
+                    "model": current_config["llm_model_name"],
+                    "openai_base_url": current_config["llm_base_url"],
+                },
+            },
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "api_key": current_config["embedder_api_key"],
+                    "model": current_config["embedder_model_name"],
+                    "openai_base_url": current_config["embedder_base_url"],
+                    "embedding_dims": current_config["TEXT_EMBEDDING_DIMENSION"],
+                },
+            },
+            "version": "v1.1",
+        }
+        
+        # 异步创建新实例
+        _mem0_instance = await create_memory_async(mem0_client_config)
+        _last_config_hash = current_hash
+        logger.info("记忆管理器已重新初始化")
+        
+    return _mem0_instance
+
+
+@plugin.mount_prompt_inject_method(name="memory_prompt_inject")
+async def memory_prompt_inject(_ctx: AgentCtx) -> str:
+    """记忆提示注入,在对话开始前检索相关记忆并注入到对话提示中"""
+    global _memory_inject_cache
+    
+    # 没有缓存或缓存已过期，执行正常流程
+    memory_config = get_memory_config()
+    if not memory_config.AUTO_MEMORY_ENABLED:
+        return ""
+    
+    # 检查缓存是否存在且未过期
+    current_time = time.time()
+    cache_key = _ctx.from_chat_key
+    if cache_key in _memory_inject_cache:
+        cache_data = _memory_inject_cache[cache_key]
+        if current_time - cache_data["timestamp"] < memory_config.TOPIC_CACHE_EXPIRE_SECONDS:
+            logger.info(f"使用缓存的记忆注入结果，剩余有效期：{int(memory_config.TOPIC_CACHE_EXPIRE_SECONDS - (current_time - cache_data['timestamp']))}秒")
+            return cache_data["result"]
+
+    try:
+        from nekro_agent.models.db_chat_channel import DBChatChannel
+        from nekro_agent.models.db_chat_message import DBChatMessage
+        
+        # 异步获取记忆客户端
+        mem0 = await get_mem0_client_async()
+        
+        # 获取会话信息
+        db_chat_channel: DBChatChannel = await DBChatChannel.get_channel(chat_key=_ctx.from_chat_key)
+        
+        # 从会话键中提取用户ID和类型
+        parts = _ctx.from_chat_key.split("_")
+        if len(parts) != 2:
+            return ""
+        
+        chat_type, chat_id = parts
+        
+        # 获取最近消息,用于识别用户和上下文
+        record_sta_timestamp = int(time.time() - core_config.AI_CHAT_CONTEXT_EXPIRE_SECONDS)
+        recent_messages: List[DBChatMessage] = await (
+            DBChatMessage.filter(
+                send_timestamp__gte=max(record_sta_timestamp, db_chat_channel.conversation_start_time.timestamp()),
+                chat_key=_ctx.from_chat_key,
+            )
+            .order_by("-send_timestamp")
+            .limit(memory_config.AUTO_MEMORY_CONTEXT_MESSAGE_COUNT)
         )
-        logger.info(f"已查询到城市 '{city}' 的天气")
+        recent_messages = [msg for msg in recent_messages if msg.sender_bind_qq != "0"] #去除系统发言
+
+        if not recent_messages:
+            return ""
+        
+        # 用于保存找到的用户记忆
+        all_memories = []
+        
+        # 构建上下文内容,用于语义搜索
+        context_content = "\n".join([db_message.parse_chat_history_prompt("") for db_message in recent_messages])
+        # 识别参与对话的用户
+        user_ids = set()
+        
+        # 只对私聊启用自动记忆检索
+        if chat_type == "private":
+            user_ids.add(chat_id)
+        elif chat_type == "group":
+            # 从最近消息中提取所有发言用户的QQ号
+            for msg in recent_messages:
+                if msg.sender_bind_qq and msg.sender_bind_qq != "0":
+                    user_ids.add(msg.sender_bind_qq)
+
+        # 没有找到有效用户ID,返回空
+        if not user_ids:
+            return ""
+            
+        # 将所有用户ID转换为列表，便于后续处理
+        user_id_list = list(user_ids)
+        
+        # 使用话题检索 - 一次性获取所有用户的关键词
+        if memory_config.AUTO_MEMORY_USE_TOPIC_SEARCH and context_content:
+            try:
+                # 获取模型配置
+                memory_manage_model_group = get_model_group_info(memory_config.MEMORY_MANAGE_MODEL)
+                
+                # 准备LLM查询 - 一次性处理所有用户的话题分析
+                system_prompt = "你是一个聊天主题分析专家，请基于以下规则，为每个用户提取关键词。\n"
+                system_prompt += "1. 格式解析要求:\n- 忽略所有包含<|Image:...>的图片消息\n- 专注处理纯文本消息内容\n- 保留原始发言顺序\n"
+                system_prompt += "2. 话题提取规则：\n(1) 逐条分析文本消息的核心讨论主题\n(2) 识别每个独立话题（如：游戏、聚餐、工作等）\n(3) 合并同义话题（如'吃饭'和'聚餐'合并为'聚餐'）"
+                system_prompt += "输出内容以'[话题内容]:[涉及的用户id]'的格式输出，多个话题用换行符分割,每个[]只能包含一个关键词"
+                system_prompt += "示例:\\n[04-10 22:15:22 from_qq:2708583339] 'Zaxpris' 说: 周末去露营怎么样？\\n[04-10 22:16:22 from_qq:123456789] 'Tom' 说: <|Image:\\\\app\\\\uploads\\\\xxx.jpg>\\n[04-10 22:17:30 from_qq:987654321] 'Lucy' 说: 露营装备需要准备哪些？" # Escaped backslash here
+                system_prompt += "输出内容应为\\n[露营]:[2708583339,123456789,987654321]"
+                system_prompt += f"\\n需要分析的用户ID列表: {', '.join(user_id_list)}"
+                
+                messages = [
+                    OpenAIChatMessage.from_text("system", system_prompt),
+                    OpenAIChatMessage.from_text("user", context_content),
+                ]
+                
+                # 调用LLM获取所有用户的话题关键词
+                llm_response = await gen_openai_chat_response(
+                    model=memory_manage_model_group.CHAT_MODEL,
+                    messages=[msg.to_dict() for msg in messages],
+                    base_url=memory_manage_model_group.BASE_URL,
+                    api_key=memory_manage_model_group.API_KEY,
+                    stream_mode=False,
+                )
+                
+                # 解析LLM回复，提取每个用户的关键词
+                user_keywords = {user_id: [] for user_id in user_ids} # 初始化，值为列表存储话题
+                for line in llm_response.response_content.strip().split("\n"):
+                    line = line.strip()
+                    # 检查格式是否为 [topic]:[user_ids]
+                    if line.startswith("[") and "]:[" in line and line.endswith("]"):
+                        try:
+                            topic_part, user_ids_part = line.split("]:[", 1)
+                            topic = topic_part[1:] # 提取话题内容
+                            user_ids_str = user_ids_part[:-1] # 提取用户ID字符串
+                            
+                            # 解析用户ID列表
+                            extracted_user_ids = [uid.strip() for uid in user_ids_str.split(",") if uid.strip()]
+                            
+                            # 将话题分配给相关用户
+                            for user_id in extracted_user_ids:
+                                if user_id in user_keywords: # 确保用户是本次分析的目标
+                                    user_keywords[user_id].append(topic)
+                                    
+                        except ValueError:
+                            logger.warning(f"无法解析话题行: {line}")
+                            continue # 跳过格式错误的行
+
+                # 将话题列表转换为逗号分隔的字符串，以便后续代码使用
+                final_user_keywords = {}
+                for user_id, topics in user_keywords.items():
+                    if topics: # 只包含有话题的用户
+                        final_user_keywords[user_id] = ", ".join(topics)
+                
+                # 使用处理后的结果
+                user_keywords = final_user_keywords
+                
+                logger.info(f"全部用户话题分析结果: {user_keywords}")
+                
+                # 为每个用户进行记忆检索
+                for user_id in user_ids:
+                    try:
+                        # 如果启用会话隔离,添加会话前缀
+                        search_user_id = _ctx.from_chat_key + user_id if memory_config.SESSION_ISOLATION else user_id
+                        
+                        # 使用该用户的关键词进行搜索
+                        if user_keywords.get(user_id):
+                            query = user_keywords[user_id]
+                            logger.info(f"用户 {user_id} 的话题关键词: {query}")
+                            
+                            result = await async_mem0_search(
+                                mem0,
+                                query=query, 
+                                user_id=search_user_id,
+                            )
+                            user_memories = result.get("results", [])
+                        else:
+                            # 如果没有获取到关键词，获取所有记忆
+                            logger.info(f"用户 {user_id} 未获得有效关键词，获取所有记忆")
+                            result = await async_mem0_get_all(mem0, user_id=search_user_id)
+                            user_memories = result.get("results", [])
+                        
+                        # 限制返回记忆数量
+                        user_memories = user_memories[:memory_config.AUTO_MEMORY_SEARCH_LIMIT]
+                        
+                        # 为每个记忆添加用户信息
+                        for memory in user_memories:
+                            memory["user_qq"] = user_id
+                            # 尝试获取用户昵称
+                            for msg in recent_messages:
+                                if msg.sender_bind_qq == user_id:
+                                    memory["user_nickname"] = msg.sender_nickname
+                                    break
+                            else:
+                                memory["user_nickname"] = user_id
+                        
+                        all_memories.extend(user_memories)
+                    except Exception as e:
+                        logger.error(f"检索用户 {user_id} 的记忆失败: {e!s}")
+                    
+            except Exception as e:
+                logger.error(f"话题分析总体失败: {e!s}")
+                # 话题分析失败时，回退到为每个用户获取所有记忆
+                for user_id in user_ids:
+                    try:
+                        search_user_id = _ctx.from_chat_key + user_id if memory_config.SESSION_ISOLATION else user_id
+                        result = await async_mem0_get_all(mem0, user_id=search_user_id)
+                        user_memories = result.get("results", [])
+                        user_memories = user_memories[:memory_config.AUTO_MEMORY_SEARCH_LIMIT]
+                        
+                        # 为每个记忆添加用户信息
+                        for memory in user_memories:
+                            memory["user_qq"] = user_id
+                            for msg in recent_messages:
+                                if msg.sender_bind_qq == user_id:
+                                    memory["user_nickname"] = msg.sender_nickname
+                                    break
+                            else:
+                                memory["user_nickname"] = user_id
+                        
+                        all_memories.extend(user_memories)
+                    except Exception as e:
+                        logger.error(f"检索用户 {user_id} 的记忆失败: {e!s}")
+        else:
+            # 不使用话题检索时，直接获取所有用户的所有记忆
+            for user_id in user_ids:
+                try:
+                    search_user_id = _ctx.from_chat_key + user_id if memory_config.SESSION_ISOLATION else user_id
+                    result = await async_mem0_get_all(mem0, user_id=search_user_id)
+                    user_memories = result.get("results", [])
+                    user_memories = user_memories[:memory_config.AUTO_MEMORY_SEARCH_LIMIT]
+                    
+                    # 为每个记忆添加用户信息
+                    for memory in user_memories:
+                        memory["user_qq"] = user_id
+                        for msg in recent_messages:
+                            if msg.sender_bind_qq == user_id:
+                                memory["user_nickname"] = msg.sender_nickname
+                                break
+                        else:
+                            memory["user_nickname"] = user_id
+                    
+                    all_memories.extend(user_memories)
+                except Exception as e:
+                    logger.error(f"检索用户 {user_id} 的记忆失败: {e!s}")
+        
+        if not all_memories:
+            return ""
+        # 按相关性排序（如果有分数的话）
+        all_memories.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
+        # 限制返回记忆数量
+        all_memories = all_memories[:memory_config.AUTO_MEMORY_SEARCH_LIMIT]
+        
+        # 格式化记忆内容
+        memory_text = "以下是当前会话的相关记忆,请你认真阅读,在没有需要的记忆内容时才使用search_memory:\n"
+        for idx, mem in enumerate(all_memories, 1):
+            metadata = mem.get("metadata", {})
+            nickname = mem.get("user_nickname", mem.get("user_qq", "未知用户"))
+            memory_id = encode_id(mem.get("id","未知ID"))
+            score = round(float(mem.get("score", 0)), 3) if mem.get("score") else "暂无"
+            memory_text += f"{idx}. [ 记忆归属: {nickname} | 元数据: {metadata} | ID: {memory_id} | 匹配度: {score} ] 内容: {mem['memory']}\n"
+        
+        # 不在日志中输出完整的记忆内容，避免过多日志
+        logger.info(f"找到 {len(all_memories)} 条相关记忆")
+        
+        # 将结果存入缓存
+        _memory_inject_cache[cache_key] = {
+            "timestamp": current_time,
+            "result": memory_text,
+        }
+        
+        # 清理过期缓存
+        expired_keys = [k for k, v in _memory_inject_cache.items() if current_time - v["timestamp"] > memory_config.TOPIC_CACHE_EXPIRE_SECONDS]
+        for k in expired_keys:
+            del _memory_inject_cache[k]
+        
+        return memory_text  # noqa: TRY300
     except Exception as e:
-        # 捕获其他所有未知异常
-        logger.exception(f"查询城市 '{city}' 天气时发生未知错误: {e}")
-        return f"查询 '{city}' 天气时发生内部错误。"
-    else:
-        return result
+        logger.error(f"自动记忆检索失败: {e!s}", exc_info=True)
+        return ""  # 出错时返回空，避免中断整个流程
 
+@plugin.mount_sandbox_method(SandboxMethodType.TOOL,name="memory_notice")
+async def _memory_notice(_ctx: AgentCtx):
+    """
+    Do Not Call This Function!
+    这是有关记忆模块的提示
+    ⚠️ 关键注意：
+    - 在使用记忆模块进行记忆存储,搜索等操作时,尽量放在代码最后进行处理,特别是send_msg_text或是send_msg_file
+    - user_id必须严格指向记忆的归属主体,metadata中的字段不可替代user_id的作用
+    - 如果要存储的记忆中包含时间信息,禁止使用(昨天,前天,之后等)相对时间概念,应使用具体的时间(比如20xx年x月x日 x时x分)
+    - 对于虚拟角色,需使用其英文小写全名,例如("hatsune_miku","takanashi_hoshino")
+    - 若记忆内容属于对话中的用户,则在存储记忆时user_id=该用户ID(如QQ号为123456的用户说"我的小名是喵喵",则user_id="123456",记忆内容为"小名是喵喵")
+    - 若记忆内容属于第三方,则在存储记忆时user_id=第三方ID(如QQ号为123456的用户说"@114514喜欢游泳",则user_id="114514",记忆内容为"喜欢游泳")
+    """
 
+@plugin.mount_sandbox_method(
+    SandboxMethodType.TOOL,
+    name="添加记忆",
+    description="指定用户id并添加长期记忆",
+)
+async def add_memory(
+    _ctx: AgentCtx,
+    memory: str,
+    user_id: str,
+    metadata: Dict[str, Any],
+) -> str:
+    """添加新记忆到用户档案
+    
+    Args:
+        memory (str): 要添加的记忆内容文本
+        **非常重要**
+        user_id (str): 关联的用户ID,标识应为用户qq,例如2708583339,而非chat_key.传入空字符串则代表查询有关自身记忆
+        metadata (Dict[str, Any]): 元数据标签,{"category": "hobbies"}
+        
+    Returns:
+        str: 记忆ID
+        
+    Example:
+        add_memory("喜欢周末打板球", "114514", {"category": "hobbies","sport_type": "cricket"})
+        add_memory("喜欢吃披萨", "123456", {"category": "hobbies","food_type": "pizza"})
+        add_memory("喜欢打csgo", "114514", {"category": "hobbies","game_type": "csgo"})
+        add_memory("小名是喵喵", "123456", {"category": "name","nickname": "喵喵"})
+    """
+    memory_config = get_memory_config()
+    mem0 = await get_mem0_client_async()
+    if user_id == "":
+        user_id = core_config.BOT_QQ
+
+    if memory_config.SESSION_ISOLATION :
+        user_id = _ctx.from_chat_key + user_id
+
+    user_id = user_id.replace(" ", "_")
+
+    try:
+        result = await async_mem0_add(mem0, messages=memory, user_id=user_id, metadata=metadata)
+        logger.info(f"添加记忆结果: {result}")
+        if result.get("results"):
+            memory_id = result["results"][0]["id"]
+            short_id = encode_id(memory_id)  # 添加编码
+            return f"记忆添加成功,ID：{short_id}"
+        return ""  # noqa: TRY300
+    except httpx.HTTPError as e:
+        logger.error(f"网络请求失败: {e!s}")
+        raise RuntimeError(f"网络请求失败: {e!s}") from e
+    except Exception as e:
+        logger.error(f"添加记忆失败: {e!s}")
+        raise RuntimeError(f"记忆添加失败: {e!s}") from e
+
+@plugin.mount_sandbox_method(
+    SandboxMethodType.AGENT,
+    name="搜索记忆",
+    description="通过模糊描述对有关记忆进行搜索",
+)
+async def search_memory(_ctx: AgentCtx, query: str, user_id: str) -> str:
+    """搜索记忆
+    在使用该方法前先关注提示词中出现的 "当前会话相关记忆" 字样,如果已有需要的相关记忆,则不需要再使用search_memory进行搜索
+    Args:
+        query (str): 要搜索的记忆内容文本,可以是问句,例如"喜欢吃什么","生日是多久"
+        user_id (str): 要查询的用户唯一标识,标识应为用户qq,例如123456,而非chat_key.传入空字符串则代表查询有关自身记忆
+    Examples:
+        search_memory("2025年3月1日吃了什么","123456")
+    """
+    memory_config = get_memory_config()
+    mem0 = await get_mem0_client_async()
+    if user_id == "":
+        user_id = core_config.BOT_QQ
+    
+    if memory_config.SESSION_ISOLATION :
+        user_id = _ctx.from_chat_key + user_id
+
+    user_id = user_id.replace(" ", "_")
+
+    try:
+        result = await async_mem0_search(mem0, query=query, user_id=user_id)
+        logger.info(f"搜索记忆结果: {result}")
+        return "以下是你对该用户的记忆:\n" + format_memories(result.get("results", []))
+    except httpx.HTTPError as e:
+        logger.error(f"网络请求失败: {e!s}")
+        raise RuntimeError(f"网络请求失败: {e!s}") from e
+    except Exception as e:
+        logger.error(f"搜索记忆失败: {e!s}")
+        raise RuntimeError(f"搜索记忆失败: {e!s}") from e
+
+@plugin.mount_sandbox_method(
+    SandboxMethodType.AGENT,
+    name="获取记忆",
+    description="获取有关该用户的所有记忆",
+)
+async def get_all_memories( _ctx: AgentCtx,user_id: str) -> str:
+    """获取用户所有记忆
+    Args:
+        user_id (str): 要查询的用户唯一标识,标识应为用户qq,例如123456,而非chat_key.传入空字符串则代表查询有关自身记忆
+    Returns:
+        str: 格式化后的记忆列表字符串,包含记忆内容和元数据
+        
+    Example:
+        get_all_memories("123456")
+    """
+    memory_config = get_memory_config()  # 获取最新配置
+    mem0 = await get_mem0_client_async()
+    if user_id == "":
+        user_id = core_config.BOT_QQ
+
+    if memory_config.SESSION_ISOLATION :
+        user_id = _ctx.from_chat_key + user_id
+
+    user_id = user_id.replace(" ", "_")
+    
+    try:        
+        result = await async_mem0_get_all(mem0, user_id=user_id)
+        logger.info(f"获取所有记忆结果: {result}")
+        return "以下是你脑海中的记忆:\n" + format_memories(result.get("results", []))
+    except httpx.HTTPError as e:
+        logger.error(f"网络请求失败: {e!s}")
+        raise RuntimeError(f"网络请求失败: {e!s}") from e
+    except Exception as e:
+        logger.error(f"获取记忆失败: {e!s}")
+        raise RuntimeError(f"获取记忆失败: {e!s}") from e
+
+@plugin.mount_sandbox_method(
+    SandboxMethodType.BEHAVIOR,
+    name="更新记忆",
+    description="根据记忆id更新记忆",
+)
+async def update_memory(_ctx: AgentCtx,memory_id: str, new_content: str) -> str:
+    """更新现有记忆内容
+    
+    Args:
+        memory_id (str): 要更新的记忆ID
+        new_content (str): 新的记忆内容文本,至少10个字符
+    Returns:
+        str: 操作结果状态信息
+        
+    Example:
+        update_memory("bf4d4092...", "喜欢周末打网球")
+    """
+    mem0 = await get_mem0_client_async()
+    try:
+        original_id = decode_id(memory_id)  # 解码短ID
+    except ValueError as e:
+        logger.error(f"无效的记忆ID: {e!s}")
+        raise ValueError(f"无效的记忆ID格式: {e!s}") from e
+    
+    try:        
+        result = await async_mem0_update(mem0, memory_id=original_id, data=new_content)
+        logger.info(f"更新记忆结果: {result}")
+        return result.get("message", "记忆更新成功")
+    except httpx.HTTPError as e:
+        logger.error(f"更新失败: {e!s}")
+        raise RuntimeError(f"网络请求失败: {e!s}") from e
+    except Exception as e:
+        logger.error(f"更新失败: {e!s}")
+        raise RuntimeError(f"记忆更新失败: {e!s}") from e
+
+@plugin.mount_sandbox_method(
+    SandboxMethodType.AGENT,
+    name="查询记忆修改记录",
+    description="查询指定记忆的修改记录",
+)
+async def get_memory_history( _ctx: AgentCtx, memory_id: str) -> str:
+    """获取记忆修改历史记录,可以查询到记忆修改历史
+    
+    Args:
+        memory_id (str): 要查询的记忆ID
+    
+    Returns:
+        str: 格式化后的历史记录字符串,包含记忆修改历史
+        
+    Example:
+        get_memory_history("bf4d4092...")
+    """
+    mem0 = await get_mem0_client_async()
+    try:
+        original_id = decode_id(memory_id)  # 解码短ID
+    except ValueError as e:
+        logger.error(f"无效的记忆ID: {e!s}")
+        raise ValueError(f"无效的记忆ID格式: {e!s}") from e
+    
+    try:
+        records = await async_mem0_history(mem0, memory_id=original_id)
+        logger.info(f"获取历史记录结果: {records}")
+        if not records:
+            return "该记忆暂无历史记录"
+            
+        formatted = []
+        for idx, r in enumerate(records, 1):
+            formatted.append(
+                f"{idx}. [事件更改类型: {r['event']}]\n"
+                f"旧内容: {r['old_memory'] or '无'}\n"
+                f"新内容: {r['new_memory'] or '无'}\n"
+                f"时间: {r['created_at']}\n",
+            )
+        return "\n".join(formatted)
+    except Exception as e:
+        logger.error(f"获取历史失败: {e!s}")
+        raise RuntimeError(f"获取记忆历史记录失败: {e!s}") from e
+    
 @plugin.mount_cleanup_method()
 async def clean_up():
-    """清理插件资源"""
-    # 如果有使用数据库连接、文件句柄或其他需要释放的资源，在此处添加清理逻辑
-    logger.info("天气查询插件资源已清理。")
+    global _mem0_instance, _last_config_hash, _thread_pool, _memory_inject_cache
+    _mem0_instance = None
+    _last_config_hash = None
+    _thread_pool.shutdown()
+    _memory_inject_cache = {}
+    """清理插件"""

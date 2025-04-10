@@ -1,16 +1,17 @@
 [tool.poetry]
-name = "nekro-plugin-template"
-version = "1.0.0-dev"
-description = "NekroAgent 插件模板"
-authors = ["KroMiose <li_xiangff@163.com>"]
+name = "nekro-plugin-memory"
+version = "0.1.1"
+description = "长期记忆管理系统,支持记忆的增删改查及语义搜索"
+authors = ["Zaxpris <zaxpris@qq.com>"]
 readme = "README.md"
 packages = []
-repository = "https://github.com/KroMiose/nekro-agent"
+repository = "https://github.com/zxjwzn/nekro-plugin-memory"
 
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.12"
-nekro-agent = "^0.9.2"
+nekro-agent = ">=1.0.0"
+mem0ai = "^0.1.79"
 
 
 [build-system]
