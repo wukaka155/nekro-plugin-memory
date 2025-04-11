@@ -6,12 +6,13 @@ authors = ["Zaxpris <zaxpris@qq.com>"]
 readme = "README.md"
 packages = []
 repository = "https://github.com/zxjwzn/nekro-plugin-memory"
-
+package-mode = false
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.12"
-nekro-agent = ">=1.0.0"
+nekro-agent = ">=1.0.0a10"
 mem0ai = "^0.1.79"
+multidict = "6.0.4"
 
 
 [build-system]
