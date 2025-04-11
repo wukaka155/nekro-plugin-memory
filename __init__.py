@@ -198,6 +198,7 @@ async def async_mem0_history(mem0, memory_id: str):
         lambda: mem0.history(memory_id=memory_id),
     )
 
+@plugin.mount_init_method()
 async def get_mem0_client_async():
     """异步获取mem0客户端实例"""
     global _mem0_instance, _last_config_hash
@@ -215,8 +216,7 @@ async def get_mem0_client_async():
         "embedder_model_name": get_model_group_info(memory_config.TEXT_EMBEDDING_MODEL).CHAT_MODEL,
         "embedder_api_key": get_model_group_info(memory_config.TEXT_EMBEDDING_MODEL).API_KEY,
         "embedder_base_url": get_model_group_info(memory_config.TEXT_EMBEDDING_MODEL).BASE_URL,
-        "qdrant_host": qdrant_config.host,
-        "qdrant_port": qdrant_config.port,
+        "qdrant_url": qdrant_config.url,
         "qdrant_api_key": qdrant_config.api_key,
     }
     
@@ -251,8 +251,7 @@ async def get_mem0_client_async():
             "vector_store": {
                 "provider": "qdrant",
                 "config": {
-                    "host": current_config["qdrant_host"],
-                    "port": current_config["qdrant_port"],
+                    "url": current_config["qdrant_url"],
                     "api_key": current_config["qdrant_api_key"],
                     "collection_name": plugin.get_vector_collection_name(),
                     "embedding_model_dims": current_config["TEXT_EMBEDDING_DIMENSION"],
