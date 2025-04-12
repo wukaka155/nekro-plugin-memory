@@ -131,7 +131,7 @@ class MemoryConfig(ConfigBase):
         description="可获取到的上下文消息数量",
     )
     AUTO_MEMORY_USE_TOPIC_SEARCH: bool = Field(
-        default=True,
+        default=False,
         title="启用话题搜索",
         description="启用后,系统将使用LLM来找到最近聊天话题,并通过话题获取相关记忆,可能会延长响应时间",
     )
@@ -339,7 +339,7 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
         all_memories = []
         
         # 构建上下文内容,用于语义搜索
-        context_content = "\n".join([db_message.parse_chat_history_prompt("") for db_message in recent_messages])
+        context_content = "\\n".join([db_message.parse_chat_history_prompt("") for db_message in recent_messages])
         # 识别参与对话的用户
         user_ids = set()
         
@@ -358,28 +358,58 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
             
         # 将所有用户ID转换为列表，便于后续处理
         user_id_list = list(user_ids)
+
+        # 初始化用于存储LLM分析结果的结构
+        user_topics = {user_id: [] for user_id in user_ids}
+        user_inferred_memories = {user_id: [] for user_id in user_ids}
+        user_candidate_memories = {user_id: [] for user_id in user_ids}
         
-        # 使用话题检索 - 一次性获取所有用户的关键词
+        # 使用LLM分析上下文 - 一次性获取所有用户的关键词、推断记忆和待存记忆
         if memory_config.AUTO_MEMORY_USE_TOPIC_SEARCH and context_content:
             try:
                 # 获取模型配置
                 memory_manage_model_group = get_model_group_info(memory_config.MEMORY_MANAGE_MODEL)
                 
-                # 准备LLM查询 - 一次性处理所有用户的话题分析
-                system_prompt = "你是一个聊天主题分析专家，请基于以下规则，为每个用户提取关键词。\n"
-                system_prompt += "1. 格式解析要求:\n- 忽略所有包含<|Image:...>的图片消息\n- 专注处理纯文本消息内容\n- 保留原始发言顺序\n"
-                system_prompt += "2. 话题提取规则：\n(1) 逐条分析文本消息的核心讨论主题\n(2) 识别每个独立话题（如：游戏、聚餐、工作等）\n(3) 合并同义话题（如'吃饭'和'聚餐'合并为'聚餐'）"
-                system_prompt += "输出内容以'[话题内容]:[涉及的用户id]'的格式输出，多个话题用换行符分割,每个[]只能包含一个关键词"
-                system_prompt += "示例:\\n[04-10 22:15:22 from_qq:2708583339] 'Zaxpris' 说: 周末去露营怎么样？\\n[04-10 22:16:22 from_qq:123456789] 'Tom' 说: <|Image:\\\\app\\\\uploads\\\\xxx.jpg>\\n[04-10 22:17:30 from_qq:987654321] 'Lucy' 说: 露营装备需要准备哪些？" # Escaped backslash here
-                system_prompt += "输出内容应为\\n[露营]:[2708583339,123456789,987654321]"
-                system_prompt += f"\\n需要分析的用户ID列表: {', '.join(user_id_list)}"
-                
+                # 准备LLM查询
+                system_prompt = """
+                你是一个信息分析专家，请基于以下规则，从聊天记录中为每个用户提取信息：
+                1. 格式解析要求:
+                - 忽略所有包含<|Image:...>的图片消息。
+                - 专注处理纯文本消息内容。
+                - 保留原始发言顺序。
+                2. 信息提取规则：
+                (1) 提取核心讨论**话题**：识别每个独立话题（如：游戏、聚餐、工作等），合并同义话题。输出格式: `[话题]:[话题内容]:[涉及的用户id列表]`，例如 `[话题]:露营:[2708583339,987654321]`。
+                (2) **推断**用户可能相关的**长期信息**或**兴趣点**：根据对话内容推断，例如用户提到了"喜欢编程"或"下周要去旅游"。输出格式: `[推断记忆]:[推断内容]:[相关用户id]`，例如 `[推断记忆]:对编程感兴趣:[2708583339]`。
+                (3) 识别**明确提及**的、适合**长期存储的具体信息**（事实、偏好、约定等）：例如"我的生日是5月1日"、"我们约好周五看电影"。输出格式: `[待存记忆]:[用户id]:[记忆内容]`，例如 `[待存记忆]:123456:生日是5月1日` 或 `[待存记忆]:987654321:周五和123456看电影`。
+                3. 输出要求：
+                - 每条提取的信息占一行。
+                - 严格按照指定的格式输出，包括方括号和冒号。
+                - 如果没有提取到某种类型的信息，则不输出该类型的行。
+
+                示例输入:
+                [04-10 22:15:22 from_qq:2708583339] 'Zaxpris' 说: 周末去露营怎么样？我最近对户外活动很感兴趣。
+                [04-10 22:16:22 from_qq:123456789] 'Tom' 说: <|Image:\\app\\uploads\\xxx.jpg> 好啊，我正好买了新帐篷。
+                [04-10 22:17:30 from_qq:987654321] 'Lucy' 说: 露营装备需要准备哪些？我下个月生日是15号，也许可以那时候去？
+                [04-10 22:18:00 from_qq:2708583339] 'Zaxpris' 说: 好主意！那我们下个月15号去露营庆祝Lucy生日。
+
+                示例输出:
+                [话题]:露营:[2708583339,123456789,987654321]
+                [话题]:生日庆祝:[987654321,2708583339]
+                [推断记忆]:对户外活动感兴趣:[2708583339]
+                [待存记忆]:123456789:购买了新帐篷
+                [待存记忆]:987654321:生日是下个月15号
+                [待存记忆]:2708583339:约定下个月15号和Lucy、Tom去露营
+
+                需要分析的用户ID列表: {user_id_list_str}
+                """
+                system_prompt = system_prompt.format(user_id_list_str=", ".join(user_id_list))
+
                 messages = [
                     OpenAIChatMessage.from_text("system", system_prompt),
                     OpenAIChatMessage.from_text("user", context_content),
                 ]
                 
-                # 调用LLM获取所有用户的话题关键词
+                # 调用LLM获取分析结果
                 llm_response = await gen_openai_chat_response(
                     model=memory_manage_model_group.CHAT_MODEL,
                     messages=[msg.to_dict() for msg in messages],
@@ -388,39 +418,44 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                     stream_mode=False,
                 )
                 
-                # 解析LLM回复，提取每个用户的关键词
-                user_keywords = {user_id: [] for user_id in user_ids} # 初始化，值为列表存储话题
-                for line in llm_response.response_content.strip().split("\n"):
-                    line = line.strip()
-                    # 检查格式是否为 [topic]:[user_ids]
-                    if line.startswith("[") and "]:[" in line and line.endswith("]"):
-                        try:
-                            topic_part, user_ids_part = line.split("]:[", 1)
-                            topic = topic_part[1:] # 提取话题内容
-                            user_ids_str = user_ids_part[:-1] # 提取用户ID字符串
-                            
-                            # 解析用户ID列表
-                            extracted_user_ids = [uid.strip() for uid in user_ids_str.split(",") if uid.strip()]
-                            
-                            # 将话题分配给相关用户
-                            for user_id in extracted_user_ids:
-                                if user_id in user_keywords: # 确保用户是本次分析的目标
-                                    user_keywords[user_id].append(topic)
-                                    
-                        except ValueError:
-                            logger.warning(f"无法解析话题行: {line}")
-                            continue # 跳过格式错误的行
+                # 解析LLM回复
+                llm_analysis_output = llm_response.response_content.strip()
+                logger.info(f"LLM分析结果:\n{llm_analysis_output}")
 
-                # 将话题列表转换为逗号分隔的字符串，以便后续代码使用
-                final_user_keywords = {}
-                for user_id, topics in user_keywords.items():
-                    if topics: # 只包含有话题的用户
-                        final_user_keywords[user_id] = ", ".join(topics)
-                
-                # 使用处理后的结果
-                user_keywords = final_user_keywords
-                
-                logger.info(f"全部用户话题分析结果: {user_keywords}")
+                for line in llm_analysis_output.split("\n"):
+                    line = line.strip()
+                    try:
+                        if line.startswith("[话题]:"):
+                            parts = line.split(":", 2)
+                            if len(parts) == 3:
+                                _, topic, user_ids_str = parts
+                                topic = topic.strip()
+                                user_ids_str = user_ids_str[1:-1] # Remove brackets
+                                extracted_user_ids = [uid.strip() for uid in user_ids_str.split(",") if uid.strip()]
+                                for user_id in extracted_user_ids:
+                                    if user_id in user_topics:
+                                        user_topics[user_id].append(topic)
+                        elif line.startswith("[推断记忆]:"):
+                            parts = line.split(":", 2)
+                            if len(parts) == 3:
+                                _, inferred_mem, user_ids_str = parts
+                                inferred_mem = inferred_mem.strip()
+                                user_ids_str = user_ids_str[1:-1] # Remove brackets
+                                extracted_user_ids = [uid.strip() for uid in user_ids_str.split(",") if uid.strip()]
+                                for user_id in extracted_user_ids:
+                                    if user_id in user_inferred_memories:
+                                        user_inferred_memories[user_id].append(inferred_mem)
+                        elif line.startswith("[待存记忆]:"):
+                            parts = line.split(":", 2)
+                            if len(parts) == 3:
+                                _, user_id, memory_content = parts
+                                user_id = user_id.strip()
+                                memory_content = memory_content.strip()
+                                if user_id in user_candidate_memories:
+                                    user_candidate_memories[user_id].append(memory_content)
+                    except Exception as e:
+                        logger.warning(f"解析LLM分析行失败: '{line}', 错误: {e!s}")
+                        continue # 跳过格式错误的行
                 
                 # 为每个用户进行记忆检索
                 for user_id in user_ids:
@@ -428,11 +463,12 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                         # 如果启用会话隔离,添加会话前缀
                         search_user_id = _ctx.from_chat_key + user_id if memory_config.SESSION_ISOLATION else user_id
                         
-                        # 使用该用户的关键词进行搜索
-                        if user_keywords.get(user_id):
-                            query = user_keywords[user_id]
-                            logger.info(f"用户 {user_id} 的话题关键词: {query}")
-                            
+                        # 合并话题和推断记忆作为搜索查询
+                        query_parts = user_topics.get(user_id, []) + user_inferred_memories.get(user_id, [])
+                        query = ", ".join(list(set(query_parts))) #去重
+
+                        if query:
+                            logger.info(f"用户 {user_id} 的组合搜索查询: {query}")
                             result = await async_mem0_search(
                                 mem0,
                                 query=query, 
@@ -440,8 +476,8 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                             )
                             user_memories = result.get("results", [])
                         else:
-                            # 如果没有获取到关键词，获取所有记忆
-                            logger.info(f"用户 {user_id} 未获得有效关键词，获取所有记忆")
+                            # 如果没有获取到关键词或推断，获取所有记忆
+                            logger.info(f"用户 {user_id} 未获得有效查询内容，获取所有记忆")
                             result = await async_mem0_get_all(mem0, user_id=search_user_id)
                             user_memories = result.get("results", [])
                         
@@ -464,8 +500,8 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                         logger.error(f"检索用户 {user_id} 的记忆失败: {e!s}")
                     
             except Exception as e:
-                logger.error(f"话题分析总体失败: {e!s}")
-                # 话题分析失败时，回退到为每个用户获取所有记忆
+                logger.error(f"LLM分析或后续处理失败: {e!s}", exc_info=True)
+                # 分析失败时，回退到为每个用户获取所有记忆
                 for user_id in user_ids:
                     try:
                         search_user_id = _ctx.from_chat_key + user_id if memory_config.SESSION_ISOLATION else user_id
@@ -473,7 +509,7 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                         user_memories = result.get("results", [])
                         user_memories = user_memories[:memory_config.AUTO_MEMORY_SEARCH_LIMIT]
                         
-                        # 为每个记忆添加用户信息
+                        # 为每个记忆添加用户信息 (代码同上)
                         for memory in user_memories:
                             memory["user_qq"] = user_id
                             for msg in recent_messages:
@@ -484,10 +520,10 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                                 memory["user_nickname"] = user_id
                         
                         all_memories.extend(user_memories)
-                    except Exception as e:
-                        logger.error(f"检索用户 {user_id} 的记忆失败: {e!s}")
+                    except Exception as inner_e:
+                        logger.error(f"回退检索用户 {user_id} 的记忆失败: {inner_e!s}")
         else:
-            # 不使用话题检索时，直接获取所有用户的所有记忆
+            # 不使用LLM分析时，直接获取所有用户的所有记忆 (逻辑同上)
             for user_id in user_ids:
                 try:
                     search_user_id = _ctx.from_chat_key + user_id if memory_config.SESSION_ISOLATION else user_id
@@ -495,7 +531,7 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                     user_memories = result.get("results", [])
                     user_memories = user_memories[:memory_config.AUTO_MEMORY_SEARCH_LIMIT]
                     
-                    # 为每个记忆添加用户信息
+                    # 为每个记忆添加用户信息 (代码同上)
                     for memory in user_memories:
                         memory["user_qq"] = user_id
                         for msg in recent_messages:
@@ -509,29 +545,67 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                 except Exception as e:
                     logger.error(f"检索用户 {user_id} 的记忆失败: {e!s}")
         
-        if not all_memories:
+        # 组合最终注入的文本
+        memory_text = ""
+        
+        # 1. LLM 分析结果
+        if memory_config.AUTO_MEMORY_USE_TOPIC_SEARCH:
+            llm_summary_parts = []
+            all_topics = {topic for topics in user_topics.values() for topic in topics}
+            all_inferred = {mem for mems in user_inferred_memories.values() for mem in mems}
+            
+            if all_topics:
+                llm_summary_parts.append(f"对话主题: {', '.join(all_topics)}")
+            if all_inferred:
+                llm_summary_parts.append(f"推断记忆点: {', '.join(all_inferred)}")
+
+            if llm_summary_parts:
+                 memory_text += "LLM分析概要:\n" + "\n".join(llm_summary_parts) + "\n-----\n"
+
+        # 2. 检索到的记忆
+        if all_memories:
+            # 按相关性排序（如果有分数的话）
+            all_memories.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
+            # 限制返回记忆数量 (二次限制，以防万一)
+            all_memories = all_memories[:memory_config.AUTO_MEMORY_SEARCH_LIMIT]
+            
+            memory_text += "以下是检索到的相关记忆,请优先参考:\n"
+            for idx, mem in enumerate(all_memories, 1):
+                metadata = mem.get("metadata", {})
+                nickname = mem.get("user_nickname", mem.get("user_qq", "未知用户"))
+                memory_id = encode_id(mem.get("id","未知ID"))
+                score = round(float(mem.get("score", 0)), 3) if mem.get("score") else "暂无"
+                memory_text += f"{idx}. [ 记忆归属: {nickname} | 元数据: {metadata} | ID: {memory_id} | 匹配度: {score} ] 内容: {mem['memory']}\n"
+            memory_text += "-----\n"
+            logger.info(f"找到 {len(all_memories)} 条相关记忆")
+        else:
+             memory_text += "未检索到与当前对话直接相关的记忆。\n-----\n"
+
+        # 3. 建议存储的新记忆
+        candidate_memory_texts = []
+        user_nicknames = {} # 缓存昵称避免重复查找
+        for msg in recent_messages:
+             if msg.sender_bind_qq and msg.sender_bind_qq not in user_nicknames:
+                 user_nicknames[msg.sender_bind_qq] = msg.sender_nickname
+
+        for user_id, memories in user_candidate_memories.items():
+            if memories:
+                nickname = user_nicknames.get(user_id, user_id) # 获取昵称
+                for mem_content in memories:
+                    candidate_memory_texts.append(f"- {nickname} ({user_id}): {mem_content}")
+        
+        if candidate_memory_texts:
+             memory_text += "LLM建议关注以下信息，可考虑使用`add_memory`存储为长期记忆:\n"
+             memory_text += "\n".join(candidate_memory_texts) + "\n"
+        
+        # 如果没有任何内容，返回空字符串
+        if not memory_text.strip():
             return ""
-        # 按相关性排序（如果有分数的话）
-        all_memories.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
-        # 限制返回记忆数量
-        all_memories = all_memories[:memory_config.AUTO_MEMORY_SEARCH_LIMIT]
-        
-        # 格式化记忆内容
-        memory_text = "以下是当前会话的相关记忆,请你认真阅读,在没有需要的记忆内容时才使用search_memory:\n"
-        for idx, mem in enumerate(all_memories, 1):
-            metadata = mem.get("metadata", {})
-            nickname = mem.get("user_nickname", mem.get("user_qq", "未知用户"))
-            memory_id = encode_id(mem.get("id","未知ID"))
-            score = round(float(mem.get("score", 0)), 3) if mem.get("score") else "暂无"
-            memory_text += f"{idx}. [ 记忆归属: {nickname} | 元数据: {metadata} | ID: {memory_id} | 匹配度: {score} ] 内容: {mem['memory']}\n"
-        
-        # 不在日志中输出完整的记忆内容，避免过多日志
-        logger.info(f"找到 {len(all_memories)} 条相关记忆")
-        
+
         # 将结果存入缓存
         _memory_inject_cache[cache_key] = {
             "timestamp": current_time,
-            "result": memory_text,
+            "result": memory_text.strip(),
         }
         
         # 清理过期缓存
@@ -539,9 +613,9 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
         for k in expired_keys:
             del _memory_inject_cache[k]
         
-        return memory_text  # noqa: TRY300
+        return memory_text.strip()
     except Exception as e:
-        logger.error(f"自动记忆检索失败: {e!s}", exc_info=True)
+        logger.error(f"自动记忆检索或注入失败: {e!s}", exc_info=True)
         return ""  # 出错时返回空，避免中断整个流程
 
 @plugin.mount_sandbox_method(SandboxMethodType.TOOL,name="memory_notice")
