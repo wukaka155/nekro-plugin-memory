@@ -198,7 +198,6 @@ async def async_mem0_history(mem0, memory_id: str):
         lambda: mem0.history(memory_id=memory_id),
     )
 
-@plugin.mount_init_method()
 async def get_mem0_client_async():
     """异步获取mem0客户端实例"""
     global _mem0_instance, _last_config_hash
