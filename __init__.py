@@ -105,10 +105,12 @@ def extract_facts_content(content: str) -> str:
         return ""  # noqa: TRY300
     except Exception:
         return ""
+
 async def get_preset(_ctx: AgentCtx) -> Union[DBPreset, DefaultPreset]:
     from nekro_agent.models.db_chat_channel import DBChatChannel
     db_chat_channel: DBChatChannel = await DBChatChannel.get_channel(chat_key=_ctx.from_chat_key)
     return await db_chat_channel.get_preset()
+
 #根据模型名获取模型组配置项
 def get_model_group_info(model_name: str) -> ModelConfigGroup:
     try:
@@ -145,7 +147,7 @@ class MemoryConfig(ConfigBase):
     PRESET_ISOLATION: bool = Field(
         default=True,
         title="人设会话隔离",
-        description="开启后会根据当前人设存储存储记忆,更换到其他人设时无法访问",
+        description="开启后会根据当前人设存储记忆,更换到其他人设时无法访问",
     )
     AUTO_MEMORY_ENABLED: bool = Field(
         default=True,
@@ -279,7 +281,7 @@ async def get_mem0_client_async(_ctx: AgentCtx):
     # 如果配置变了或者实例不存在，重新初始化
     if _mem0_instance is None or current_hash != _last_config_hash:
         #获取当前人设
-        
+        preset = await get_preset(_ctx)
         # 重新构建配置
         mem0_client_config = {
             "vector_store": {
@@ -287,7 +289,7 @@ async def get_mem0_client_async(_ctx: AgentCtx):
                 "config": {
                     "url": current_config["qdrant_url"],
                     "api_key": current_config["qdrant_api_key"],
-                    "collection_name": await get_preset(_ctx).name,
+                    "collection_name": preset.name,
                     "embedding_model_dims": current_config["TEXT_EMBEDDING_DIMENSION"],
                 },
             },
@@ -329,8 +331,9 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
     if not memory_config.AUTO_MEMORY_ENABLED:
         return ""
     
-    character_lore_id = await get_preset(_ctx).name
-    character_content = await get_preset(_ctx).content
+    preset = await get_preset(_ctx)
+    character_lore_id = preset.name
+    character_content = preset.content
     # 检查缓存是否存在且未过期
     current_time = time.time()
     cache_key = _ctx.from_chat_key
@@ -424,9 +427,9 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                 - 严格按照指定的格式输出，包括方括号和冒号。
                 - 如果没有提取到某种类型的信息，则不输出该类型的行。
 
-                当前聊天记录视角为QQ:{core_config.BOT_QQ} 人设名为:{character_lore_id}
+                当前聊天记录主视角为QQ:{core_config.BOT_QQ} 人设名为:{character_lore_id}
                 人设中涉及到的事物,角色,概念等为:{extract_facts_content(character_content)}
-                
+
                 示例输入1:
                 [04-10 22:15:22 from_qq:2708583339] 'Zaxpris' 说: 周末去露营怎么样？我最近对户外活动很感兴趣。
                 [04-10 22:16:22 from_qq:123456789] 'Tom' 说: <|Image:\\app\\uploads\\xxx.jpg> 好啊，我正好买了新帐篷。
@@ -579,7 +582,7 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                     for q in character_memory_queries:
                         combined_character_query = q["intent"]
                         search_character_id = q["entity"]
-                        logger.info(f"角色记忆组合搜索查询: {combined_character_query}")
+                        logger.info(f"{search_character_id}角色记忆组合搜索查询: {combined_character_query}")
                         try:
                             result = await async_mem0_search(
                                 mem0,
@@ -597,7 +600,7 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
 
                 # 将字典的值转换为列表
                 character_lore_memories = list(character_lore_memories_dict.values())
-
+                character_lore_memories = character_lore_memories[:memory_config.AUTO_MEMORY_SEARCH_LIMIT]
             except Exception as e:
                 logger.error(f"LLM分析或后续处理失败: {e!s}", exc_info=True)
                 # 分析失败时，回退到为每个用户获取所有记忆
@@ -720,11 +723,11 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
         # 如果没有任何内容，返回空字符串
         if not memory_text.strip():
             return ""
-
+        logger.info(f"自动记忆检索结果: {memory_text}")
         # 将结果存入缓存
         _memory_inject_cache[cache_key] = {
             "timestamp": current_time,
-            "result": memory_text.strip(),
+            "result": memory_text,
         }
         
         # 清理过期缓存
