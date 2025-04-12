@@ -560,7 +560,7 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                 llm_summary_parts.append(f"推断记忆点: {', '.join(all_inferred)}")
 
             if llm_summary_parts:
-                 memory_text += "LLM分析概要:\n" + "\n".join(llm_summary_parts) + "\n-----\n"
+                memory_text += "LLM分析概要:\n" + "\n".join(llm_summary_parts) + "\n-----\n"
 
         # 2. 检索到的记忆
         if all_memories:
@@ -575,18 +575,19 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                 nickname = mem.get("user_nickname", mem.get("user_qq", "未知用户"))
                 memory_id = encode_id(mem.get("id","未知ID"))
                 score = round(float(mem.get("score", 0)), 3) if mem.get("score") else "暂无"
-                memory_text += f"{idx}. [ 记忆归属: {nickname} | 元数据: {metadata} | ID: {memory_id} | 匹配度: {score} ] 内容: {mem['memory']}\n"
+                created_at = mem.get("created_at", "未知时间") # 获取创建时间
+                memory_text += f"{idx}. [ 记忆归属: {nickname} | 元数据: {metadata} | ID: {memory_id} | 创建时间: {created_at} | 匹配度: {score} ] 内容: {mem['memory']}\n"
             memory_text += "-----\n"
             logger.info(f"找到 {len(all_memories)} 条相关记忆")
         else:
-             memory_text += "未检索到与当前对话直接相关的记忆。\n-----\n"
+            memory_text += "未检索到与当前对话直接相关的记忆。\n-----\n"
 
         # 3. 建议存储的新记忆
         candidate_memory_texts = []
         user_nicknames = {} # 缓存昵称避免重复查找
         for msg in recent_messages:
-             if msg.sender_bind_qq and msg.sender_bind_qq not in user_nicknames:
-                 user_nicknames[msg.sender_bind_qq] = msg.sender_nickname
+            if msg.sender_bind_qq and msg.sender_bind_qq not in user_nicknames:
+                user_nicknames[msg.sender_bind_qq] = msg.sender_nickname
 
         for user_id, memories in user_candidate_memories.items():
             if memories:
@@ -595,8 +596,8 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                     candidate_memory_texts.append(f"- {nickname} ({user_id}): {mem_content}")
         
         if candidate_memory_texts:
-             memory_text += "LLM建议关注以下信息，可考虑使用`add_memory`存储为长期记忆:\n"
-             memory_text += "\n".join(candidate_memory_texts) + "\n"
+            memory_text += "LLM建议关注以下信息，可考虑使用`add_memory`存储为长期记忆:\n"
+            memory_text += "\n".join(candidate_memory_texts) + "\n"
         
         # 如果没有任何内容，返回空字符串
         if not memory_text.strip():
