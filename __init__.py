@@ -181,13 +181,23 @@ def get_memory_config() -> MemoryConfig:
     """获取最新的记忆模块配置"""
     return plugin.get_config(MemoryConfig)
 
-# 初始化mem0客户端
 _mem0_instance = None
 _last_config_hash = None
-_thread_pool = ThreadPoolExecutor(max_workers=5)  # 创建一个线程池用于执行同步操作
+_thread_pool = None  # 创建一个线程池用于执行同步操作
 
 # 添加记忆注入缓存，避免短时间内重复执行
 _memory_inject_cache = {}
+
+@plugin.mount_init_method()
+async def init_memory():
+    global _mem0_instance,_last_config_hash,_thread_pool,_memory_inject_cache
+    # 初始化mem0客户端
+    _mem0_instance = None
+    _last_config_hash = None
+    _thread_pool = ThreadPoolExecutor(max_workers=5)  # 创建一个线程池用于执行同步操作
+
+    # 添加记忆注入缓存，避免短时间内重复执行
+    _memory_inject_cache = {}
 
 # 异步创建Memory实例
 async def create_memory_async(config: Dict[str, Any]) -> Memory:
@@ -975,6 +985,6 @@ async def clean_up():
     global _mem0_instance, _last_config_hash, _thread_pool, _memory_inject_cache
     _mem0_instance = None
     _last_config_hash = None
-    _thread_pool.shutdown()
+    _thread_pool.shutdown() # type: ignore
     _memory_inject_cache = {}
     """清理插件"""
