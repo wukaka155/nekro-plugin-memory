@@ -606,6 +606,7 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                             # 使用字典合并，避免重复添加
                             for memory in result.get("results", []):
                                 if memory.get("id") and memory["id"] not in character_lore_memories_dict:
+                                    memory["owner_entity"] = search_character_id # 存储归属实体
                                     character_lore_memories_dict[memory["id"]] = memory
                             logger.info(f"检索到 {len(result.get('results', []))} 条角色相关记忆，当前总计 {len(character_lore_memories_dict)} 条")
                         except Exception as e:
@@ -709,8 +710,10 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                 memory_id = encode_id(mem.get("id","未知ID"))
                 score = round(float(mem.get("score", 0)), 3) if mem.get("score") else "暂无"
                 created_at = mem.get("created_at", "未知时间")
-                # 角色记忆不需要显示用户昵称，显示ID和元数据即可
-                memory_text += f"{idx}. [ 角色信息 | 元数据: {metadata} | ID: {memory_id} | 创建时间: {created_at} | 匹配度: {score} ] 内容: {mem['memory']}\n"
+                
+                # 角色记忆需要显示归属实体
+                owner = mem.get("owner_entity", "未知角色") # 获取存储的归属实体
+                memory_text += f"{idx}. [ 记忆归属: {owner} | 元数据: {metadata} | ID: {memory_id} | 创建时间: {created_at} | 匹配度: {score} ] 内容: {mem['memory']}\n"
             memory_text += "-----\n"
             logger.info(f"找到 {len(character_lore_memories)} 条角色相关记忆")
         # 如果没找到角色记忆，可以不显示或提示未找到
