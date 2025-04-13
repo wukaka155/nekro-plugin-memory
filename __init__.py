@@ -15,6 +15,7 @@ from nekro_agent.models.db_chat_channel import DefaultPreset
 from nekro_agent.models.db_preset import DBPreset
 from nekro_agent.services.agent.creator import OpenAIChatMessage
 from nekro_agent.services.agent.openai import gen_openai_chat_response
+from nekro_agent.services.message.message_service import message_service
 from nekro_agent.services.plugin.base import ConfigBase, NekroPlugin, SandboxMethodType
 from pydantic import Field
 
@@ -341,7 +342,8 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
         cache_data = _memory_inject_cache[cache_key]
         if current_time - cache_data["timestamp"] < memory_config.TOPIC_CACHE_EXPIRE_SECONDS:
             logger.info(f"使用缓存的记忆注入结果，剩余有效期：{int(memory_config.TOPIC_CACHE_EXPIRE_SECONDS - (current_time - cache_data['timestamp']))}秒")
-            return cache_data["result"]
+            await message_service.push_system_message(agent_messages=cache_data["result"],chat_key=_ctx.from_chat_key,trigger_agent=False)
+            return ""
 
     try:
         from nekro_agent.models.db_chat_channel import DBChatChannel
@@ -734,8 +736,8 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
         expired_keys = [k for k, v in _memory_inject_cache.items() if current_time - v["timestamp"] > memory_config.TOPIC_CACHE_EXPIRE_SECONDS]
         for k in expired_keys:
             del _memory_inject_cache[k]
-        
-        return memory_text.strip()
+        await message_service.push_system_message(agent_messages=memory_text,chat_key=_ctx.from_chat_key,trigger_agent=False)
+        return ""  # noqa: TRY300
     except Exception as e:
         logger.error(f"自动记忆检索或注入失败: {e!s}", exc_info=True)
         return ""  # 出错时返回空，避免中断整个流程
