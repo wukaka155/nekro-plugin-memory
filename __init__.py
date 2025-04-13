@@ -421,7 +421,8 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                 (1) 提取核心讨论**话题**：识别每个独立话题（如：游戏、聚餐、工作等），合并同义话题。输出格式: `[话题]:[话题内容]:[涉及的用户id列表]`，例如 `[话题]:露营:[2708583339,987654321]`。
                 (2) **推断**用户可能相关的**长期信息**或**兴趣点**：根据对话内容推断，例如用户提到了"喜欢编程"或"下周要去旅游"。输出格式: `[推断记忆]:[推断内容]:[相关用户id]`，例如 `[推断记忆]:对编程感兴趣:[2708583339]`。
                 (3) 识别**明确提及**的、适合**长期存储的具体信息**（事实、偏好、约定等）：例如"我的生日是5月1日"、"我们约好周五看电影"。输出格式: `[待存记忆]:[用户id]:[记忆内容]`，例如 `[待存记忆]:123456:生日是5月1日` 或 `[待存记忆]:987654321:周五和123456看电影`。
-                (4) **识别**对话中提及的**角色相关信息查询点**：当对话内容涉及对扮演角色(以"伊地知虹夏"为例)或其关联人/事/物(例如："小波奇"、"山田凉"、"喜多"、"STARRY"、"鼓棒"、"姐姐"、"生日"、"性格"、"梦想"等)的提问、讨论或评价时，提取关键实体和查询意图。人物名称需使用其英文小写全名,例如("ijichi_nijika","hitori_bocchi") 输出格式：`[角色记忆]:[提及的实体]:[查询意图或相关描述]`，例如 `[角色记忆]:hitori_bocchi:如何看待她` 或 `[角色记忆]:ijichi_nijika:使用的鼓棒品牌型号` 或 `[角色记忆]:伊地知虹夏:性格特点`。
+                (4) **识别**对话中提及的**角色相关信息查询点**：当对话内容涉及对扮演角色(以人设名为"伊地知虹夏"为例)或其关联人/事/物(例如："小波奇"、"山田凉"、"喜多"、"STARRY"、"鼓棒"、"姐姐"、"生日"、"性格"、"梦想"等)的提问、讨论或评价时，提取关键实体和查询意图。人物名称需使用其英文小写全名,例如("kita_ikuyo","hitori_bocchi") 输出格式：`[角色记忆]:[提及的实体]:[查询意图或相关描述]`，例如 `[角色记忆]:hitori_bocchi:如何看待她` 或 `[角色记忆]:伊地知虹夏:使用的鼓棒品牌型号` 或 `[角色记忆]:伊地知虹夏:性格特点`。
+                (5) 当识别到自己的记忆时之间使用人设名,以人设名为"伊地知虹夏"为例,例如[角色记忆]:伊地知虹夏:组建乐队的梦想
                 3. 输出要求：
                 - 每条提取的信息占一行。
                 - 严格按照指定的格式输出，包括方括号和冒号。
@@ -456,9 +457,9 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                 [话题]:STARRY对虹夏的意义:[987654321]
                 [话题]:虹夏组建乐队的梦想:[2708583339]
                 [角色记忆]:hitori_bocchi:对她的看法和评价
-                [角色记忆]:ijichi_nijika:使用的鼓棒品牌和型号
+                [角色记忆]:伊地知虹夏:使用的鼓棒品牌和型号
                 [角色记忆]:STARRY:对它的重要性和情感
-                [角色记忆]:ijichi_nijika:组建乐队的梦想
+                [角色记忆]:伊地知虹夏:组建乐队的梦想
 
                 需要分析的用户ID列表: {", ".join(user_id_list)}
                 """
@@ -784,7 +785,11 @@ async def add_memory(
     memory_config = get_memory_config()
     mem0 = await get_mem0_client_async(_ctx)
     if user_id == "":
-        user_id = core_config.BOT_QQ
+        if memory_config.PRESET_ISOLATION:
+            preset = await get_preset(_ctx)
+            user_id = preset.name
+        else:
+            user_id = core_config.BOT_QQ
 
     if memory_config.SESSION_ISOLATION :
         user_id = _ctx.from_chat_key + user_id
@@ -823,7 +828,11 @@ async def search_memory(_ctx: AgentCtx, query: str, user_id: str) -> str:
     memory_config = get_memory_config()
     mem0 = await get_mem0_client_async(_ctx)
     if user_id == "":
-        user_id = core_config.BOT_QQ
+        if memory_config.PRESET_ISOLATION:
+            preset = await get_preset(_ctx)
+            user_id = preset.name
+        else:
+            user_id = core_config.BOT_QQ
     
     if memory_config.SESSION_ISOLATION :
         user_id = _ctx.from_chat_key + user_id
@@ -859,7 +868,11 @@ async def get_all_memories( _ctx: AgentCtx,user_id: str) -> str:
     memory_config = get_memory_config()  # 获取最新配置
     mem0 = await get_mem0_client_async(_ctx)
     if user_id == "":
-        user_id = core_config.BOT_QQ
+        if memory_config.PRESET_ISOLATION:
+            preset = await get_preset(_ctx)
+            user_id = preset.name
+        else:
+            user_id = core_config.BOT_QQ
 
     if memory_config.SESSION_ISOLATION :
         user_id = _ctx.from_chat_key + user_id
