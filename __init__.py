@@ -600,7 +600,6 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
 
                 # 将字典的值转换为列表
                 character_lore_memories = list(character_lore_memories_dict.values())
-                character_lore_memories = character_lore_memories[:memory_config.AUTO_MEMORY_SEARCH_LIMIT]
             except Exception as e:
                 logger.error(f"LLM分析或后续处理失败: {e!s}", exc_info=True)
                 # 分析失败时，回退到为每个用户获取所有记忆
