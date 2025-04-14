@@ -3,6 +3,7 @@ import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Union
 
 import httpx
@@ -84,6 +85,27 @@ def format_memories(results: List[Dict]) -> str:
         f"匹配度: {score}\n",
     )
     return "\n".join(formatted)
+
+def format_beijing_time(iso_timestamp_str: str) -> str:
+    """将 ISO 8601 格式的时间字符串转换为北京时间 (年-月-日 时:分)"""
+    if not isinstance(iso_timestamp_str, str): # 添加类型检查以防万一
+        return "未知时间"
+    try:
+        # 解析 ISO 8601 格式的字符串，自动处理时区信息
+        dt = datetime.fromisoformat(iso_timestamp_str.replace("Z", "+00:00")) # 处理 'Z' 时区标识符
+        
+        # 定义北京时区 (UTC+8)
+        beijing_tz = timezone(timedelta(hours=8))
+        
+        # 将时间转换为北京时间
+        dt_beijing = dt.astimezone(beijing_tz)
+        
+        # 格式化为 "年-月-日 时:分"
+        return dt_beijing.strftime("%Y年%m月%d日 %H:%M")
+    except (ValueError, TypeError):
+        # 如果解析或转换失败，返回原始字符串或默认值
+        # logger.warning(f"无法解析时间戳: {iso_timestamp_str}", exc_info=True) # 可选：添加日志记录
+        return "未知时间"
 
 def extract_facts_content(content: str) -> str:
     """
@@ -704,8 +726,9 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                 nickname = mem.get("user_nickname", mem.get("user_qq", "未知用户"))
                 memory_id = encode_id(mem.get("id","未知ID"))
                 score = round(float(mem.get("score", 0)), 3) if mem.get("score") else "暂无"
-                created_at = mem.get("created_at", "未知时间") # 获取创建时间
-                memory_text += f"{idx}. [ 记忆归属: {nickname} | 元数据: {metadata} | ID: {memory_id} | 创建时间: {created_at} | 匹配度: {score} ] 内容: {mem['memory']}\n"
+                created_at_raw = mem.get("created_at", "未知时间") # 获取原始创建时间
+                created_at_formatted = format_beijing_time(created_at_raw) # 格式化时间
+                memory_text += f"{idx}. [ 记忆归属: {nickname} | 元数据: {metadata} | ID: {memory_id} | 创建时间: {created_at_formatted} | 匹配度: {score} ] 内容: {mem['memory']}\n"
             memory_text += "-----\n"
             logger.info(f"找到 {len(all_memories)} 条相关记忆")
         else:
@@ -723,11 +746,12 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                 metadata = mem.get("metadata", {})
                 memory_id = encode_id(mem.get("id","未知ID"))
                 score = round(float(mem.get("score", 0)), 3) if mem.get("score") else "暂无"
-                created_at = mem.get("created_at", "未知时间")
+                created_at_raw = mem.get("created_at", "未知时间") # 获取原始创建时间
+                created_at_formatted = format_beijing_time(created_at_raw) # 格式化时间
                 
                 # 角色记忆需要显示归属实体
                 owner = mem.get("owner_entity", "未知角色") # 获取存储的归属实体
-                memory_text += f"{idx}. [ 记忆归属: {owner} | 元数据: {metadata} | ID: {memory_id} | 创建时间: {created_at} | 匹配度: {score} ] 内容: {mem['memory']}\n"
+                memory_text += f"{idx}. [ 记忆归属: {owner} | 元数据: {metadata} | ID: {memory_id} | 创建时间: {created_at_formatted} | 匹配度: {score} ] 内容: {mem['memory']}\n"
             memory_text += "-----\n"
             logger.info(f"找到 {len(character_lore_memories)} 条角色相关记忆")
         # 如果没找到角色记忆，可以不显示或提示未找到
@@ -976,7 +1000,7 @@ async def get_memory_history( _ctx: AgentCtx, memory_id: str) -> str:
                 f"{idx}. [事件更改类型: {r['event']}]\n"
                 f"旧内容: {r['old_memory'] or '无'}\n"
                 f"新内容: {r['new_memory'] or '无'}\n"
-                f"时间: {r['created_at']}\n",
+                f"时间: {format_beijing_time(r['created_at'])}\n",
             )
         return "\n".join(formatted)
     except Exception as e:
