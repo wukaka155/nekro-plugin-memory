@@ -110,7 +110,9 @@ def extract_facts_content(content: str) -> str:
 async def get_preset(_ctx: AgentCtx) -> Union[DBPreset, DefaultPreset]:
     from nekro_agent.models.db_chat_channel import DBChatChannel
     db_chat_channel: DBChatChannel = await DBChatChannel.get_channel(chat_key=_ctx.from_chat_key)
-    return await db_chat_channel.get_preset()
+    preset = await db_chat_channel.get_preset()
+    logger.info(f"当前人设{preset.name}")
+    return preset
 
 #根据模型名获取模型组配置项
 def get_model_group_info(model_name: str) -> ModelConfigGroup:
@@ -248,7 +250,8 @@ async def get_mem0_client_async(_ctx: AgentCtx):
     global _mem0_instance, _last_config_hash
     memory_config = get_memory_config()  # 始终获取最新配置
     qdrant_config = get_qdrant_config()
-        
+    #获取当前人设
+    preset = await get_preset(_ctx)
     # 计算当前配置的哈希值
     current_config = {
         "MEMORY_MANAGE_MODEL": memory_config.MEMORY_MANAGE_MODEL,
@@ -263,6 +266,7 @@ async def get_mem0_client_async(_ctx: AgentCtx):
         "embedder_base_url": get_model_group_info(memory_config.TEXT_EMBEDDING_MODEL).BASE_URL,
         "qdrant_url": qdrant_config.url,
         "qdrant_api_key": qdrant_config.api_key,
+        "preset_name": preset.name,
     }
     
     # 验证字段不能为空字符串
@@ -291,8 +295,6 @@ async def get_mem0_client_async(_ctx: AgentCtx):
     
     # 如果配置变了或者实例不存在，重新初始化
     if _mem0_instance is None or current_hash != _last_config_hash:
-        #获取当前人设
-        preset = await get_preset(_ctx)
         # 重新构建配置
         mem0_client_config = {
             "vector_store": {
@@ -300,7 +302,7 @@ async def get_mem0_client_async(_ctx: AgentCtx):
                 "config": {
                     "url": current_config["qdrant_url"],
                     "api_key": current_config["qdrant_api_key"],
-                    "collection_name": preset.name,
+                    "collection_name": current_config["preset_name"],
                     "embedding_model_dims": current_config["TEXT_EMBEDDING_DIMENSION"],
                 },
             },
