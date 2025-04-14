@@ -338,7 +338,17 @@ async def get_mem0_client_async(_ctx: AgentCtx):
 async def memory_prompt_inject(_ctx: AgentCtx) -> str:
     """记忆提示注入,在对话开始前检索相关记忆并注入到对话提示中"""
     global _memory_inject_cache
-    
+    notice = """
+    这是有关记忆模块的提示
+    ⚠️ 关键注意：
+    - 在使用记忆模块进行记忆存储,搜索等操作时,尽量放在代码最后进行处理,特别是send_msg_text或是send_msg_file
+    - user_id必须严格指向记忆的归属主体,metadata中的字段不可替代user_id的作用
+    - 如果要存储的记忆中包含时间信息,禁止使用(昨天,前天,之后等)相对时间概念,应使用具体的时间(比如20xx年x月x日 x时x分)
+    - 对于虚拟角色,需使用其英文小写全名,例如("hatsune_miku","takanashi_hoshino")
+    - 若记忆内容属于对话中的用户,则在存储记忆时user_id=该用户ID(如QQ号为123456的用户说"我的小名是喵喵",则user_id="123456",记忆内容为"小名是喵喵")
+    - 若记忆内容属于第三方,则在存储记忆时user_id=第三方ID(如QQ号为123456的用户说"@114514喜欢游泳",则user_id="114514",记忆内容为"喜欢游泳")
+    """
+    await message_service.push_system_message(agent_messages=notice,chat_key=_ctx.from_chat_key,trigger_agent=False)
     # 没有缓存或缓存已过期，执行正常流程
     memory_config = get_memory_config()
     if not memory_config.AUTO_MEMORY_ENABLED:
@@ -437,6 +447,8 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                 (3) 识别**明确提及**的、适合**长期存储的具体信息**（事实、偏好、约定等）：例如"我的生日是5月1日"、"我们约好周五看电影"。输出格式: `[待存记忆]:[用户id]:[记忆内容]`，例如 `[待存记忆]:123456:生日是5月1日` 或 `[待存记忆]:987654321:周五和123456看电影`。
                 (4) **识别**对话中提及的**角色相关信息查询点**：当对话内容涉及对扮演角色(以人设名为"伊地知虹夏"为例)或其关联人/事/物(例如："小波奇"、"山田凉"、"喜多"、"STARRY"、"鼓棒"、"姐姐"、"生日"、"性格"、"梦想"等)的提问、讨论或评价时，提取关键实体和查询意图。人物名称需使用其英文小写全名,例如("kita_ikuyo","hitori_bocchi") 输出格式：`[角色记忆]:[提及的实体]:[查询意图或相关描述]`，例如 `[角色记忆]:hitori_bocchi:如何看待她` 或 `[角色记忆]:伊地知虹夏:使用的鼓棒品牌型号` 或 `[角色记忆]:伊地知虹夏:性格特点`。
                 (5) 当识别到自己的记忆时之间使用人设名,以人设名为"伊地知虹夏"为例,例如[角色记忆]:伊地知虹夏:组建乐队的梦想
+                (6) 如果推断或已经确定要存储的记忆中包含时间信息,禁止使用(昨天,前天,之后等)相对时间概念,应使用具体的时间(比如20xx年x月x日 x时x分)
+                (7) 对于虚拟角色,需使用其英文小写全名,例如("hatsune_miku","takanashi_hoshino")
                 3. 输出要求：
                 - 每条提取的信息占一行。
                 - 严格按照指定的格式输出，包括方括号和冒号。
@@ -456,8 +468,8 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                 [话题]:生日庆祝:[987654321,2708583339]
                 [推断记忆]:对户外活动感兴趣:[2708583339]
                 [待存记忆]:123456789:购买了新帐篷
-                [待存记忆]:987654321:生日是下个月15号
-                [待存记忆]:2708583339:约定下个月15号和Lucy、Tom去露营
+                [待存记忆]:987654321:生日是5月15日
+                [待存记忆]:2708583339:约定5月15日15号和Lucy、Tom去露营
 
                 示例输入2:
                 [04-10 22:15:22 from_qq:2708583339] 'Zaxpris' 说: 虹夏，你觉得小波奇怎么样？她吉他弹得真好！
@@ -756,20 +768,6 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
     except Exception as e:
         logger.error(f"自动记忆检索或注入失败: {e!s}", exc_info=True)
         return ""  # 出错时返回空，避免中断整个流程
-
-@plugin.mount_sandbox_method(SandboxMethodType.TOOL,name="memory_notice")
-async def _memory_notice(_ctx: AgentCtx):
-    """
-    Do Not Call This Function!
-    这是有关记忆模块的提示
-    ⚠️ 关键注意：
-    - 在使用记忆模块进行记忆存储,搜索等操作时,尽量放在代码最后进行处理,特别是send_msg_text或是send_msg_file
-    - user_id必须严格指向记忆的归属主体,metadata中的字段不可替代user_id的作用
-    - 如果要存储的记忆中包含时间信息,禁止使用(昨天,前天,之后等)相对时间概念,应使用具体的时间(比如20xx年x月x日 x时x分)
-    - 对于虚拟角色,需使用其英文小写全名,例如("hatsune_miku","takanashi_hoshino")
-    - 若记忆内容属于对话中的用户,则在存储记忆时user_id=该用户ID(如QQ号为123456的用户说"我的小名是喵喵",则user_id="123456",记忆内容为"小名是喵喵")
-    - 若记忆内容属于第三方,则在存储记忆时user_id=第三方ID(如QQ号为123456的用户说"@114514喜欢游泳",则user_id="114514",记忆内容为"喜欢游泳")
-    """
 
 @plugin.mount_sandbox_method(
     SandboxMethodType.TOOL,
