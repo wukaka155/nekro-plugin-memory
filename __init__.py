@@ -363,7 +363,7 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
     notice = """
     这是有关记忆模块的提示
     ⚠️ 关键注意：
-    - 在使用记忆模块进行记忆存储,搜索等操作时,尽量放在代码最后进行处理,特别是send_msg_text或是send_msg_file
+    - 在使用记忆模块进行记忆存储,搜索(add_memory,search_memory)等操作时,尽量放在代码最后进行处理,特别是send_msg_text或是send_msg_file
     - user_id必须严格指向记忆的归属主体,metadata中的字段不可替代user_id的作用
     - 如果要存储的记忆中包含时间信息,禁止使用(昨天,前天,之后等)相对时间概念,应使用具体的时间(比如20xx年x月x日 x时x分)
     - 对于虚拟角色,需使用其英文小写全名,例如("hatsune_miku","takanashi_hoshino")
