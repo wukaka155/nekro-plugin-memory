@@ -360,17 +360,6 @@ async def get_mem0_client_async(_ctx: AgentCtx):
 async def memory_prompt_inject(_ctx: AgentCtx) -> str:
     """记忆提示注入,在对话开始前检索相关记忆并注入到对话提示中"""
     global _memory_inject_cache
-    notice = """
-    这是有关记忆模块的提示
-    ⚠️ 关键注意：
-    - 在使用记忆模块进行记忆存储,搜索(add_memory,search_memory)等操作时,尽量放在代码最后进行处理,特别是send_msg_text或是send_msg_file
-    - user_id必须严格指向记忆的归属主体,metadata中的字段不可替代user_id的作用
-    - 如果要存储的记忆中包含时间信息,禁止使用(昨天,前天,之后等)相对时间概念,应使用具体的时间(比如20xx年x月x日 x时x分)
-    - 对于虚拟角色,需使用其英文小写全名,例如("hatsune_miku","takanashi_hoshino")
-    - 若记忆内容属于对话中的用户,则在存储记忆时user_id=该用户ID(如QQ号为123456的用户说"我的小名是喵喵",则user_id="123456",记忆内容为"小名是喵喵")
-    - 若记忆内容属于第三方,则在存储记忆时user_id=第三方ID(如QQ号为123456的用户说"@114514喜欢游泳",则user_id="114514",记忆内容为"喜欢游泳")
-    """
-    await message_service.push_system_message(agent_messages=notice,chat_key=_ctx.from_chat_key,trigger_agent=False)
     # 没有缓存或缓存已过期，执行正常流程
     memory_config = get_memory_config()
     if not memory_config.AUTO_MEMORY_ENABLED:
@@ -792,6 +781,24 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
     except Exception as e:
         logger.error(f"自动记忆检索或注入失败: {e!s}", exc_info=True)
         return ""  # 出错时返回空，避免中断整个流程
+
+@plugin.mount_sandbox_method(
+    SandboxMethodType.TOOL,
+    name="记忆模块使用提示",
+    description="这是有关记忆模块的提示 Do Not Call This Function!!!",
+)
+async def add_memory_notice(_ctx: AgentCtx):
+    """
+    这是有关记忆模块的提示 Do Not Call This Function!!!
+    ⚠️ 关键注意：
+    - 在使用记忆模块进行记忆存储,搜索(add_memory,search_memory)等操作时,尽量放在代码最后进行处理,特别是send_msg_text或是send_msg_file
+    - user_id必须严格指向记忆的归属主体,metadata中的字段不可替代user_id的作用
+    - 如果要存储的记忆中包含时间信息,禁止使用(昨天,前天,之后等)相对时间概念,应使用具体的时间(比如20xx年x月x日 x时x分)
+    - 对于虚拟角色,需使用其英文小写全名,例如("hatsune_miku","takanashi_hoshino")
+    - 若记忆内容属于对话中的用户,则在存储记忆时user_id=该用户ID(如QQ号为123456的用户说"我的小名是喵喵",则user_id="123456",记忆内容为"小名是喵喵")
+    - 若记忆内容属于第三方,则在存储记忆时user_id=第三方ID(如QQ号为123456的用户说"@114514喜欢游泳",则user_id="114514",记忆内容为"喜欢游泳")
+    """
+    return ""
 
 @plugin.mount_sandbox_method(
     SandboxMethodType.TOOL,
