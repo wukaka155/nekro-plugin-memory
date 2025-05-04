@@ -759,7 +759,7 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
                     candidate_memory_texts.append(f"- {nickname} ({user_id}): {mem_content}")
         
         if candidate_memory_texts:
-            memory_text += "LLM建议关注以下信息，可考虑使用`add_memory`存储为长期记忆:\n"
+            memory_text += "建议关注以下信息，可考虑使用`add_memory`存储为长期记忆, 内容仅作为参考 使用add_memory进行记忆添加时内容需使用当前人设的口吻记录:\n"
             memory_text += "\n".join(candidate_memory_texts) + "\n"
         
         # 如果没有任何内容，返回空字符串
