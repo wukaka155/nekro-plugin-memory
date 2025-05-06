@@ -412,6 +412,7 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
         
         # 用于保存找到的用户记忆
         all_memories = []
+        character_lore_memories = [] # 在此处初始化
         
         # 构建上下文内容,用于语义搜索
         context_content = "\\n".join([db_message.parse_chat_history_prompt("") for db_message in recent_messages])
