@@ -1229,7 +1229,7 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
         from_chat_key=chat_key,
     )
     if not cmd_content:
-        return await matcher.finish("请输入要搜索用户")
+        return await matcher.finish("请输入要搜索的用户")
     result = await get_all_memories(_ctx, cmd_content)
 
     await finish_with(matcher, message=result)
