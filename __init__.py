@@ -854,7 +854,7 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
             # 限制返回记忆数量 (二次限制，以防万一)
             all_memories = all_memories[: memory_config.AUTO_MEMORY_SEARCH_LIMIT]
 
-            memory_text += "以下是检索到的相关记忆,请优先参考\n当你发现与对话无关的记忆时,请使用delete_memory删除该记忆\n"
+            memory_text += "以下是检索到的相关记忆,请优先参考\n当你发现与对话无关且匹配度较高(>0.7)的记忆时,请使用delete_memory删除该记忆,出现较低匹配度的记忆无需处理\n"
             for idx, mem in enumerate(all_memories, 1):
                 metadata = mem.get("metadata", {})
                 nickname = mem.get("user_nickname", mem.get("user_qq", "未知用户"))
@@ -1225,7 +1225,7 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
 @on_command("memory_get_all", aliases={"memory-get-all"}, priority=5, block=True).handle()
 async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
     username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
-    _ctx = AgentCtx(
+    _ctx = AgentCtx( 
         from_chat_key=chat_key,
     )
     if not cmd_content:
