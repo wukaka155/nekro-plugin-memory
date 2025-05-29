@@ -1202,7 +1202,12 @@ async def delete_memory(_ctx: AgentCtx, memory_id: str) -> None:
     mem_id = decode_id(memory_id)
     await async_mem0_delete(mem0, mem_id)
 
-
+def split_by_last_space(text):
+    match = re.match(r"^(.*)\s+(\S+)$", text.strip())
+    if match:
+        return match.group(1), match.group(2)
+    return None, None
+    
 @on_command("memory_search", aliases={"memory-search"}, priority=5, block=True).handle()
 async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
     username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
@@ -1211,7 +1216,8 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
     _ctx = AgentCtx(
         from_chat_key=chat_key,
     )
-    result = await search_memory(_ctx, cmd_content, username)
+    query,userid  = split_by_last_space(cmd_content)
+    result = await search_memory(_ctx, query, userid)
 
     await finish_with(matcher, message=result)
     return None
@@ -1222,10 +1228,12 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
     _ctx = AgentCtx(
         from_chat_key=chat_key,
     )
-    result = await get_all_memories(_ctx, username)
+    if not cmd_content:
+        return await matcher.finish("请输入要搜索用户")
+    result = await get_all_memories(_ctx, cmd_content)
 
     await finish_with(matcher, message=result)
-    return
+    return None
 
 @on_command("memory_delete", aliases={"memory-delete"}, priority=5, block=True).handle()
 async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
