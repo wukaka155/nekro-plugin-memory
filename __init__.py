@@ -77,7 +77,7 @@ def decode_id(encoded_id: str) -> str:
         raise ValueError("无效的短ID格式") from err
 
 
-def format_memories(results: List[Dict]) -> str:
+def format_memories(results: List[Dict], score_threshold: float = 0.0) -> str:
     """格式化记忆列表为字符串"""
     if not results:
         return "未找到任何记忆"
@@ -87,6 +87,8 @@ def format_memories(results: List[Dict]) -> str:
         metadata = mem.get("metadata", {})
         created_at = mem.get("created_at", "未知时间")
         score = mem.get("score", "暂无")
+        if score != "暂无" and float(score) < score_threshold:
+            continue
         formatted.append(
             f"{idx}. [ID: {encode_id(mem['id'])}]\n"  # 使用短ID
             f"内容: {mem['memory']}\n"
@@ -183,6 +185,11 @@ class MemoryConfig(ConfigBase):
         default=1024,
         title="嵌入维度",
         description="嵌入维度",
+    )
+    MEMORY_SEARCH_SCORE_THRESHOLD: float = Field(
+        default=0.0,
+        title="记忆匹配度阈值",
+        description="搜索记忆时，匹配度低于该值的记忆将被过滤掉，取值范围0-1",
     )
     SESSION_ISOLATION: bool = Field(
         default=True,
@@ -1052,7 +1059,7 @@ async def search_memory(_ctx: AgentCtx, query: str, user_id: str) -> str:
     try:
         result = await async_mem0_search(mem0, query=query, user_id=user_id)
         logger.info(f"搜索记忆结果: {result}")
-        return "以下是你对该用户的记忆:\n" + format_memories(result.get("results", []))
+        return "以下是你对该用户的记忆:\n" + format_memories(result.get("results", []), memory_config.MEMORY_SEARCH_SCORE_THRESHOLD)
     except httpx.HTTPError as e:
         logger.error(f"网络请求失败: {e!s}")
         raise RuntimeError(f"网络请求失败: {e!s}") from e
@@ -1093,7 +1100,7 @@ async def get_all_memories(_ctx: AgentCtx, user_id: str) -> str:
     try:
         result = await async_mem0_get_all(mem0, user_id=user_id)
         logger.info(f"获取所有记忆结果: {result}")
-        return "以下是你脑海中的记忆:\n" + format_memories(result.get("results", []))
+        return "以下是你搜索到的记忆:\n" + format_memories(result.get("results", []))
     except httpx.HTTPError as e:
         logger.error(f"网络请求失败: {e!s}")
         raise RuntimeError(f"网络请求失败: {e!s}") from e
@@ -1202,11 +1209,11 @@ async def delete_memory(_ctx: AgentCtx, memory_id: str) -> None:
     mem_id = decode_id(memory_id)
     await async_mem0_delete(mem0, mem_id)
 
-def split_by_last_space(text):
+def split_by_last_space(text: str) -> tuple[str, str]:
     match = re.match(r"^(.*)\s+(\S+)$", text.strip())
     if match:
         return match.group(1), match.group(2)
-    return None, None
+    return "", ""
     
 @on_command("memory_search", aliases={"memory-search"}, priority=5, block=True).handle()
 async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
@@ -1218,7 +1225,6 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
     )
     query,userid  = split_by_last_space(cmd_content)
     result = await search_memory(_ctx, query, userid)
-
     await finish_with(matcher, message=result)
     return None
 
