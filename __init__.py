@@ -39,7 +39,6 @@ plugin = NekroPlugin(
 # 在现有import后添加以下代码
 BASE62_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-
 def encode_base62(number: int) -> str:
     """将大整数编码为Base62字符串"""
     if number == 0:
@@ -118,8 +117,6 @@ def format_beijing_time(iso_timestamp_str: str) -> str:
         # 格式化为 "年-月-日 时:分"
         return dt_beijing.strftime("%Y年%m月%d日 %H:%M")
     except (ValueError, TypeError):
-        # 如果解析或转换失败，返回原始字符串或默认值
-        # logger.warning(f"无法解析时间戳: {iso_timestamp_str}", exc_info=True) # 可选：添加日志记录
         return "未知时间"
 
 
@@ -134,12 +131,8 @@ def extract_facts_content(content: str) -> str:
         如果找到标签之间的内容，则返回该内容字符串；否则返回 None。
     """
     try:
-        # 使用正则表达式查找标签之间的内容
-        # re.DOTALL 使 '.' 匹配包括换行符在内的任何字符
         match = re.search(r"<facts>(.*?)</facts>", content, re.DOTALL)
         if match:
-            # group(1) 返回第一个捕获组的内容，即标签之间的文本
-            # strip() 用于移除开头和结尾的空白字符（包括换行符）
             return match.group(1).strip()
         return ""  # noqa: TRY300
     except Exception:
@@ -201,30 +194,10 @@ class MemoryConfig(ConfigBase):
         title="人设会话隔离",
         description="开启后会根据当前人设存储记忆,更换到其他人设时无法访问",
     )
-    AUTO_MEMORY_ENABLED: bool = Field(
-        default=True,
-        title="启用自动记忆检索",
-        description="启用后,系统将在对话开始时自动检索与当前对话相关的用户的所有记忆",
-    )
-    AUTO_MEMORY_SEARCH_LIMIT: int = Field(
-        default=5,
-        title="自动记忆检索数量上限",
-        description="自动检索时返回的记忆条数上限",
-    )
     AUTO_MEMORY_CONTEXT_MESSAGE_COUNT: int = Field(
         default=5,
         title="上下文消息数",
         description="可获取到的上下文消息数量",
-    )
-    AUTO_MEMORY_USE_TOPIC_SEARCH: bool = Field(
-        default=False,
-        title="启用话题搜索",
-        description="启用后,系统将使用LLM来找到最近聊天话题,并通过话题获取相关记忆,可能会延长响应时间",
-    )
-    TOPIC_CACHE_EXPIRE_SECONDS: int = Field(
-        default=60,
-        title="话题缓存时长",
-        description="系统将临时保留话题,超时后再重新总结",
     )
 
 
@@ -422,533 +395,6 @@ async def get_mem0_client_async(_ctx: AgentCtx):
     return _mem0_instance
 
 
-@plugin.mount_prompt_inject_method(name="memory_prompt_inject")
-async def memory_prompt_inject(_ctx: AgentCtx) -> str:
-    """记忆提示注入,在对话开始前检索相关记忆并注入到对话提示中"""
-    global _memory_inject_cache
-    # 没有缓存或缓存已过期，执行正常流程
-    memory_config = get_memory_config()
-    if not memory_config.AUTO_MEMORY_ENABLED:
-        return ""
-
-    preset = await get_preset(_ctx)
-    character_lore_id = preset.name
-    character_content = preset.content
-    # 检查缓存是否存在且未过期
-    current_time = time.time()
-    cache_key = _ctx.from_chat_key
-    if cache_key in _memory_inject_cache:
-        cache_data = _memory_inject_cache[cache_key]
-        if (
-            current_time - cache_data["timestamp"]
-            < memory_config.TOPIC_CACHE_EXPIRE_SECONDS
-        ):
-            logger.info(
-                f"使用缓存的记忆注入结果，剩余有效期：{int(memory_config.TOPIC_CACHE_EXPIRE_SECONDS - (current_time - cache_data['timestamp']))}秒",
-            )
-            await message_service.push_system_message(
-                agent_messages=cache_data["result"],
-                chat_key=_ctx.from_chat_key,
-                trigger_agent=False,
-            )
-            return ""
-
-    try:
-        from nekro_agent.models.db_chat_channel import DBChatChannel
-        from nekro_agent.models.db_chat_message import DBChatMessage
-
-        # 异步获取记忆客户端
-        mem0 = await get_mem0_client_async(_ctx)
-
-        # 获取会话信息
-        db_chat_channel: DBChatChannel = await DBChatChannel.get_channel(
-            chat_key=_ctx.from_chat_key,
-        )
-
-        # 从会话键中提取用户ID和类型
-        parts = _ctx.from_chat_key.split("_")
-        if len(parts) != 2:
-            return ""
-
-        chat_type, chat_id = parts
-
-        # 获取最近消息,用于识别用户和上下文
-        record_sta_timestamp = int(
-            time.time() - core_config.AI_CHAT_CONTEXT_EXPIRE_SECONDS,
-        )
-        recent_messages: List[DBChatMessage] = await (
-            DBChatMessage.filter(
-                send_timestamp__gte=max(
-                    record_sta_timestamp,
-                    db_chat_channel.conversation_start_time.timestamp(),
-                ),
-                chat_key=_ctx.from_chat_key,
-            )
-            .order_by("-send_timestamp")
-            .limit(memory_config.AUTO_MEMORY_CONTEXT_MESSAGE_COUNT)
-        )
-        recent_messages = [
-            msg for msg in recent_messages if msg.sender_bind_qq != "0"
-        ]  # 去除系统发言
-
-        if not recent_messages:
-            return ""
-
-        # 用于保存找到的用户记忆
-        all_memories = []
-        character_lore_memories = []  # 在此处初始化
-
-        # 构建上下文内容,用于语义搜索
-        context_content = "\\n".join(
-            [db_message.parse_chat_history_prompt("") for db_message in recent_messages],
-        )
-        # 识别参与对话的用户
-        user_ids = set()
-
-        # 只对私聊启用自动记忆检索
-        if chat_type == "private":
-            user_ids.add(chat_id)
-        elif chat_type == "group":
-            # 从最近消息中提取所有发言用户的QQ号
-            for msg in recent_messages:
-                if msg.sender_bind_qq and msg.sender_bind_qq != "0":
-                    user_ids.add(msg.sender_bind_qq)
-
-        # 没有找到有效用户ID,返回空
-        if not user_ids:
-            return ""
-
-        # 将所有用户ID转换为列表，便于后续处理
-        user_id_list = list(user_ids)
-
-        # 初始化用于存储LLM分析结果的结构
-        user_topics = {user_id: [] for user_id in user_ids}
-        user_inferred_memories = {user_id: [] for user_id in user_ids}
-        user_candidate_memories = {user_id: [] for user_id in user_ids}
-
-        # 使用LLM分析上下文 - 一次性获取所有用户的关键词、推断记忆和待存记忆
-        if memory_config.AUTO_MEMORY_USE_TOPIC_SEARCH and context_content:
-            try:
-                # 获取模型配置
-                memory_manage_model_group = get_model_group_info(
-                    memory_config.MEMORY_MANAGE_MODEL,
-                )
-
-                # 准备LLM查询
-                system_prompt = f"""
-                你是一个信息分析专家，请基于以下规则，从聊天记录中为每个用户提取信息：
-                1. 格式解析要求:
-                - 忽略所有包含<|Image:...>的图片消息。
-                - 专注处理纯文本消息内容。
-                - 保留原始发言顺序。
-                2. 信息提取规则：
-                (1) 提取核心讨论**话题**：识别每个独立话题（如：游戏、聚餐、工作等），合并同义话题。输出格式: `[话题]:[话题内容]:[涉及的用户id列表]`，例如 `[话题]:露营:[2708583339,987654321]`。
-                (2) **推断**用户可能相关的**长期信息**或**兴趣点**：根据对话内容推断，例如用户提到了"喜欢编程"或"下周要去旅游"。输出格式: `[推断记忆]:[推断内容]:[相关用户id]`，例如 `[推断记忆]:对编程感兴趣:[2708583339]`。
-                (3) 识别**明确提及**的、适合**长期存储的具体信息**（具体发生的事件、对于某件事物的事实、某人的偏好、约定等）：例如"我的生日是5月1日"、"我们约好周五看电影"。输出格式: `[待存记忆]:[用户id]:[记忆内容]`，例如 `[待存记忆]:123456:生日是5月1日` 或 `[待存记忆]:987654321:周五和123456看电影`。
-                (4) **识别**对话中提及的**角色相关信息查询点**：当对话内容涉及对扮演角色(以人设名为"伊地知虹夏"为例)或其关联人/事/物(例如："小波奇"、"山田凉"、"喜多"、"STARRY"、"鼓棒"、"姐姐"、"生日"、"性格"、"梦想"等)的提问、讨论或评价时，提取关键实体和查询意图。人物名称需使用其英文小写全名,例如("kita_ikuyo","hitori_bocchi") 输出格式：`[角色记忆]:[提及的实体]:[查询意图或相关描述]`，例如 `[角色记忆]:hitori_bocchi:如何看待她` 或 `[角色记忆]:伊地知虹夏:使用的鼓棒品牌型号` 或 `[角色记忆]:伊地知虹夏:性格特点`。
-                (5) 当识别到自己的记忆时之间使用人设名,以人设名为"伊地知虹夏"为例,例如[角色记忆]:伊地知虹夏:组建乐队的梦想
-                (6) 如果推断或已经确定要存储的记忆中包含时间信息,禁止使用(昨天,前天,之后等)相对时间概念,应使用具体的时间(比如20xx年x月x日 x时x分)
-                (7) 对于虚拟角色,需使用其英文小写全名,例如("hatsune_miku","takanashi_hoshino")
-                3. 输出要求：
-                - 每条提取的信息占一行。
-                - 严格按照指定的格式输出，包括方括号和冒号。
-                - 如果没有提取到某种类型的信息，则不输出该类型的行。
-
-                当前聊天记录主视角为QQ:{core_config.BOT_QQ} 人设名为:{character_lore_id}
-                人设中涉及到的事物,角色,概念等为:{extract_facts_content(character_content)}
-
-                示例输入1:
-                [04-10 22:15:22 from_qq:2708583339] 'Zaxpris' 说: 周末去露营怎么样？我最近对户外活动很感兴趣。
-                [04-10 22:16:22 from_qq:123456789] 'Tom' 说: <|Image:\\app\\uploads\\xxx.jpg> 好啊，我正好买了新帐篷。
-                [04-10 22:17:30 from_qq:987654321] 'Lucy' 说: 露营装备需要准备哪些？我下个月生日是15号，也许可以那时候去？
-                [04-10 22:18:00 from_qq:2708583339] 'Zaxpris' 说: 好主意！那我们下个月15号去露营庆祝Lucy生日。
-
-                示例输出1:
-                [话题]:露营:[2708583339,123456789,987654321]
-                [话题]:生日庆祝:[987654321,2708583339]
-                [推断记忆]:对户外活动感兴趣:[2708583339]
-                [待存记忆]:123456789:购买了新帐篷
-                [待存记忆]:987654321:生日是5月15日
-                [待存记忆]:2708583339:约定5月15日15号和Lucy、Tom去露营
-
-                示例输入2:
-                [04-10 22:15:22 from_qq:2708583339] 'Zaxpris' 说: 虹夏，你觉得小波奇怎么样？她吉他弹得真好！
-                [04-10 22:16:22 from_qq:123456789] 'Tom' 说: 对了，虹夏你用的鼓棒是什么牌子的？上次live听起来音色不错。
-                [04-10 22:17:30 from_qq:987654321] 'Lucy' 说: STARRY对虹夏来说一定很重要吧？
-                [04-10 22:18:00 from_qq:2708583339] 'Zaxpris' 说: 我们下次聊聊虹夏组建乐队的梦想吧！
-                
-                示例输出2:
-                [话题]:小波奇的吉他技术:[2708583339]
-                [话题]:虹夏的鼓棒:[123456789]
-                [话题]:STARRY对虹夏的意义:[987654321]
-                [话题]:虹夏组建乐队的梦想:[2708583339]
-                [角色记忆]:hitori_bocchi:对她的看法和评价
-                [角色记忆]:伊地知虹夏:使用的鼓棒品牌和型号
-                [角色记忆]:STARRY:对它的重要性和情感
-                [角色记忆]:伊地知虹夏:组建乐队的梦想
-
-                需要分析的用户ID列表: {", ".join(user_id_list)}
-                """
-
-                messages = [
-                    OpenAIChatMessage.from_text("system", system_prompt),
-                    OpenAIChatMessage.from_text("user", context_content),
-                ]
-
-                # 调用LLM获取分析结果
-                llm_response = await gen_openai_chat_response(
-                    model=memory_manage_model_group.CHAT_MODEL,
-                    messages=[msg.to_dict() for msg in messages],
-                    base_url=memory_manage_model_group.BASE_URL,
-                    api_key=memory_manage_model_group.API_KEY,
-                    stream_mode=False,
-                )
-
-                # 解析LLM回复
-                llm_analysis_output = llm_response.response_content.strip()
-                logger.info(f"LLM分析结果:\n{llm_analysis_output}")
-
-                # 新增：用于存储角色记忆查询请求的列表
-                character_memory_queries = []
-
-                for line in llm_analysis_output.split("\n"):
-                    line = line.strip()
-                    try:
-                        if line.startswith("[话题]:"):
-                            parts = line.split(":", 2)
-                            if len(parts) == 3:
-                                _, topic, user_ids_str = parts
-                                topic = topic.strip()
-                                user_ids_str = user_ids_str[1:-1]  # Remove brackets
-                                extracted_user_ids = [
-                                    uid.strip()
-                                    for uid in user_ids_str.split(",")
-                                    if uid.strip()
-                                ]
-                                for user_id in extracted_user_ids:
-                                    if user_id in user_topics:
-                                        user_topics[user_id].append(topic)
-                        elif line.startswith("[推断记忆]:"):
-                            parts = line.split(":", 2)
-                            if len(parts) == 3:
-                                _, inferred_mem, user_ids_str = parts
-                                inferred_mem = inferred_mem.strip()
-                                user_ids_str = user_ids_str[1:-1]  # Remove brackets
-                                extracted_user_ids = [
-                                    uid.strip()
-                                    for uid in user_ids_str.split(",")
-                                    if uid.strip()
-                                ]
-                                for user_id in extracted_user_ids:
-                                    if user_id in user_inferred_memories:
-                                        user_inferred_memories[user_id].append(
-                                            inferred_mem,
-                                        )
-                        elif line.startswith("[待存记忆]:"):
-                            parts = line.split(":", 2)
-                            if len(parts) == 3:
-                                _, user_id, memory_content = parts
-                                user_id = user_id.strip()
-                                memory_content = memory_content.strip()
-                                if user_id in user_candidate_memories:
-                                    user_candidate_memories[user_id].append(
-                                        memory_content,
-                                    )
-                        # 新增：解析角色记忆查询
-                        elif line.startswith("[角色记忆]:"):
-                            parts = line.split(":", 2)
-                            if len(parts) == 3:
-                                _, entity, intent = parts
-                                character_memory_queries.append(
-                                    {"entity": entity.strip(), "intent": intent.strip()},
-                                )
-
-                    except Exception as e:
-                        logger.warning(f"解析LLM分析行失败: '{line}', 错误: {e!s}")
-                        continue  # 跳过格式错误的行
-
-                # 为每个用户进行记忆检索
-                for user_id in user_ids:
-                    try:
-                        # 如果启用会话隔离,添加会话前缀
-                        search_user_id = (
-                            _ctx.from_chat_key + user_id
-                            if memory_config.SESSION_ISOLATION
-                            else user_id
-                        )
-
-                        # 合并话题和推断记忆作为搜索查询
-                        query_parts = user_topics.get(
-                            user_id, [],
-                        ) + user_inferred_memories.get(user_id, [])
-                        query = ", ".join(list(set(query_parts)))  # 去重
-
-                        if query:
-                            logger.info(f"用户 {user_id} 的组合搜索查询: {query}")
-                            result = await async_mem0_search(
-                                mem0,
-                                query=query,
-                                user_id=search_user_id,
-                                limit=memory_config.AUTO_MEMORY_SEARCH_LIMIT,
-                            )
-                            user_memories = result.get("results", [])
-                        else:
-                            # 如果没有获取到关键词或推断，获取所有记忆
-                            logger.info(
-                                f"用户 {user_id} 未获得有效查询内容，获取所有记忆",
-                            )
-                            result = await async_mem0_get_all(
-                                mem0,
-                                user_id=search_user_id,
-                                limit=memory_config.AUTO_MEMORY_SEARCH_LIMIT,
-                            )
-                            user_memories = result.get("results", [])
-
-                        # 限制返回记忆数量
-                        user_memories = user_memories[
-                            : memory_config.AUTO_MEMORY_SEARCH_LIMIT
-                        ]
-
-                        # 为每个记忆添加用户信息
-                        for memory in user_memories:
-                            memory["user_qq"] = user_id
-                            # 尝试获取用户昵称
-                            for msg in recent_messages:
-                                if msg.sender_bind_qq == user_id:
-                                    memory["user_nickname"] = msg.sender_nickname
-                                    break
-                            else:
-                                memory["user_nickname"] = user_id
-
-                        all_memories.extend(user_memories)
-                    except Exception as e:
-                        logger.error(f"检索用户 {user_id} 的记忆失败: {e!s}")
-
-                # 新增：进行角色记忆检索
-                character_lore_memories_dict = {}  # 使用字典去重
-                # 假设角色知识库的 user_id 是固定的，例如 "伊地知虹夏_lore"
-                # 注意：这个 ID 需要与存储角色信息时使用的 ID 一致
-
-                # 也可以考虑不加会话隔离前缀，让角色知识全局可用
-                # search_character_id = _ctx.from_chat_key + character_lore_id if memory_config.SESSION_ISOLATION else character_lore_id
-                search_character_id = character_lore_id  # 假设角色知识是全局的
-
-                if character_memory_queries:
-                    for q in character_memory_queries:
-                        combined_character_query = q["intent"]
-                        search_character_id = q["entity"]
-                        logger.info(
-                            f"{search_character_id}角色记忆组合搜索查询: {combined_character_query}",
-                        )
-                        try:
-                            result = await async_mem0_search(
-                                mem0,
-                                query=combined_character_query,
-                                user_id=search_character_id,  # 使用角色特定的ID进行搜索
-                                limit=memory_config.AUTO_MEMORY_SEARCH_LIMIT,  # 同样限制数量
-                            )
-                            # 使用字典合并，避免重复添加
-                            for memory in result.get("results", []):
-                                if (
-                                    memory.get("id")
-                                    and memory["id"] not in character_lore_memories_dict
-                                ):
-                                    memory["owner_entity"] = (
-                                        search_character_id  # 存储归属实体
-                                    )
-                                    character_lore_memories_dict[memory["id"]] = memory
-                            logger.info(
-                                f"检索到 {len(result.get('results', []))} 条角色相关记忆，当前总计 {len(character_lore_memories_dict)} 条",
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"检索角色 {search_character_id} 的记忆失败: {e!s}",
-                            )
-
-                # 将字典的值转换为列表
-                character_lore_memories = list(character_lore_memories_dict.values())
-            except Exception as e:
-                logger.error(f"LLM分析或后续处理失败: {e!s}", exc_info=True)
-                # 分析失败时，回退到为每个用户获取所有记忆
-                for user_id in user_ids:
-                    try:
-                        search_user_id = (
-                            _ctx.from_chat_key + user_id
-                            if memory_config.SESSION_ISOLATION
-                            else user_id
-                        )
-                        result = await async_mem0_get_all(
-                            mem0,
-                            user_id=search_user_id,
-                            limit=memory_config.AUTO_MEMORY_SEARCH_LIMIT,
-                        )
-                        user_memories = result.get("results", [])
-                        user_memories = user_memories[
-                            : memory_config.AUTO_MEMORY_SEARCH_LIMIT
-                        ]
-
-                        # 为每个记忆添加用户信息 (代码同上)
-                        for memory in user_memories:
-                            memory["user_qq"] = user_id
-                            for msg in recent_messages:
-                                if msg.sender_bind_qq == user_id:
-                                    memory["user_nickname"] = msg.sender_nickname
-                                    break
-                            else:
-                                memory["user_nickname"] = user_id
-
-                        all_memories.extend(user_memories)
-                    except Exception as inner_e:
-                        logger.error(f"回退检索用户 {user_id} 的记忆失败: {inner_e!s}")
-        else:
-            # 不使用LLM分析时，直接获取所有用户的所有记忆 (逻辑同上)
-            for user_id in user_ids:
-                try:
-                    search_user_id = (
-                        _ctx.from_chat_key + user_id
-                        if memory_config.SESSION_ISOLATION
-                        else user_id
-                    )
-                    result = await async_mem0_get_all(
-                        mem0,
-                        user_id=search_user_id,
-                        limit=memory_config.AUTO_MEMORY_SEARCH_LIMIT,
-                    )
-                    user_memories = result.get("results", [])
-                    user_memories = user_memories[
-                        : memory_config.AUTO_MEMORY_SEARCH_LIMIT
-                    ]
-
-                    # 为每个记忆添加用户信息 (代码同上)
-                    for memory in user_memories:
-                        memory["user_qq"] = user_id
-                        for msg in recent_messages:
-                            if msg.sender_bind_qq == user_id:
-                                memory["user_nickname"] = msg.sender_nickname
-                                break
-                        else:
-                            memory["user_nickname"] = user_id
-
-                    all_memories.extend(user_memories)
-                except Exception as e:
-                    logger.error(f"检索用户 {user_id} 的记忆失败: {e!s}")
-
-        # 组合最终注入的文本
-        memory_text = ""
-
-        # 1. LLM 分析结果
-        if memory_config.AUTO_MEMORY_USE_TOPIC_SEARCH:
-            llm_summary_parts = []
-            all_topics = {topic for topics in user_topics.values() for topic in topics}
-            all_inferred = {
-                mem for mems in user_inferred_memories.values() for mem in mems
-            }
-
-            if all_topics:
-                llm_summary_parts.append(f"对话主题: {', '.join(all_topics)}")
-            if all_inferred:
-                llm_summary_parts.append(f"推断记忆点: {', '.join(all_inferred)}")
-
-            if llm_summary_parts:
-                memory_text += (
-                    "LLM分析概要:\n" + "\n".join(llm_summary_parts) + "\n-----\n"
-                )
-
-        # 2. 检索到的记忆
-        if all_memories:
-            # 按相关性排序（如果有分数的话）
-            all_memories.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
-            # 限制返回记忆数量 (二次限制，以防万一)
-            all_memories = all_memories[: memory_config.AUTO_MEMORY_SEARCH_LIMIT]
-
-            memory_text += "以下是检索到的相关记忆,请优先参考\n当你发现与对话无关且匹配度较高(>0.7)的记忆时,请使用delete_memory删除该记忆,出现较低匹配度的记忆无需处理\n"
-            for idx, mem in enumerate(all_memories, 1):
-                metadata = mem.get("metadata", {})
-                nickname = mem.get("user_nickname", mem.get("user_qq", "未知用户"))
-                memory_id = encode_id(mem.get("id", "未知ID"))
-                score = (
-                    round(float(mem.get("score", 0)), 3) if mem.get("score") else "暂无"
-                )
-                created_at_raw = mem.get("created_at", "未知时间")  # 获取原始创建时间
-                created_at_formatted = format_beijing_time(created_at_raw)  # 格式化时间
-                memory_text += f"{idx}. [ 记忆归属: {nickname} | 元数据: {metadata} | ID: {memory_id} | 创建时间: {created_at_formatted} | 匹配度: {score} ] 内容: {mem['memory']}\n"
-            memory_text += "-----\n"
-            logger.info(f"找到 {len(all_memories)} 条相关记忆")
-        else:
-            memory_text += "未检索到与当前对话直接相关的记忆。\n-----\n"
-
-        # 新增：3. 检索到的角色记忆
-        if character_lore_memories:
-            # 角色记忆也按相关性排序
-            character_lore_memories.sort(
-                key=lambda x: float(x.get("score", 0) or 0), reverse=True,
-            )
-            # 限制数量（如果需要再次限制）
-            # character_lore_memories = character_lore_memories[:memory_config.AUTO_MEMORY_SEARCH_LIMIT]
-
-            memory_text += "以下是检索到的对于当前扮演角色相关信息:\n"
-            for idx, mem in enumerate(character_lore_memories, 1):
-                metadata = mem.get("metadata", {})
-                memory_id = encode_id(mem.get("id", "未知ID"))
-                score = (
-                    round(float(mem.get("score", 0)), 3) if mem.get("score") else "暂无"
-                )
-                created_at_raw = mem.get("created_at", "未知时间")  # 获取原始创建时间
-                created_at_formatted = format_beijing_time(created_at_raw)  # 格式化时间
-
-                # 角色记忆需要显示归属实体
-                owner = mem.get("owner_entity", "未知角色")  # 获取存储的归属实体
-                memory_text += f"{idx}. [ 记忆归属: {owner} | 元数据: {metadata} | ID: {memory_id} | 创建时间: {created_at_formatted} | 匹配度: {score} ] 内容: {mem['memory']}\n"
-            memory_text += "-----\n"
-            logger.info(f"找到 {len(character_lore_memories)} 条角色相关记忆")
-        # 如果没找到角色记忆，可以不显示或提示未找到
-
-        # 4. 建议存储的新记忆
-        candidate_memory_texts = []
-        user_nicknames = {}  # 缓存昵称避免重复查找
-        for msg in recent_messages:
-            if msg.sender_bind_qq and msg.sender_bind_qq not in user_nicknames:
-                user_nicknames[msg.sender_bind_qq] = msg.sender_nickname
-
-        for user_id, memories in user_candidate_memories.items():
-            if memories:
-                nickname = user_nicknames.get(user_id, user_id)  # 获取昵称
-                for mem_content in memories:
-                    candidate_memory_texts.append(
-                        f"- {nickname} ({user_id}): {mem_content}",
-                    )
-
-        if candidate_memory_texts:
-            memory_text += "建议关注以下信息，可考虑使用`add_memory`存储为长期记忆, 内容仅作为参考 使用add_memory进行记忆添加时内容需使用当前人设的口吻记录:\n"
-            memory_text += "\n".join(candidate_memory_texts) + "\n"
-
-        # 如果没有任何内容，返回空字符串
-        if not memory_text.strip():
-            return ""
-        logger.info(f"自动记忆检索结果: {memory_text}")
-        # 将结果存入缓存
-        _memory_inject_cache[cache_key] = {
-            "timestamp": current_time,
-            "result": memory_text,
-        }
-
-        # 清理过期缓存
-        expired_keys = [
-            k
-            for k, v in _memory_inject_cache.items()
-            if current_time - v["timestamp"] > memory_config.TOPIC_CACHE_EXPIRE_SECONDS
-        ]
-        for k in expired_keys:
-            del _memory_inject_cache[k]
-        await message_service.push_system_message(
-            agent_messages=memory_text, chat_key=_ctx.from_chat_key, trigger_agent=False,
-        )
-        return ""  # noqa: TRY300
-    except Exception as e:
-        logger.error(f"自动记忆检索或注入失败: {e!s}", exc_info=True)
-        return ""  # 出错时返回空，避免中断整个流程
-
-
 @plugin.mount_sandbox_method(
     SandboxMethodType.TOOL,
     name="记忆模块使用提示",
@@ -956,14 +402,14 @@ async def memory_prompt_inject(_ctx: AgentCtx) -> str:
 )
 async def add_memory_notice(_ctx: AgentCtx):
     """
-    这是有关记忆模块的提示 Do Not Call This Function!!!
-    ⚠️ 关键注意：
-    - 在使用记忆模块进行记忆存储,搜索(add_memory,search_memory)等操作时,尽量放在代码最后进行处理,特别是send_msg_text或是send_msg_file
-    - user_id必须严格指向记忆的归属主体,metadata中的字段不可替代user_id的作用
-    - 如果要存储的记忆中包含时间信息,禁止使用(昨天,前天,之后等)相对时间概念,应使用具体的时间(比如20xx年x月x日 x时x分)
-    - 对于虚拟角色,需使用其英文小写全名,例如("hatsune_miku","takanashi_hoshino")
-    - 若记忆内容属于对话中的用户,则在存储记忆时user_id=该用户ID(如QQ号为123456的用户说"我的小名是喵喵",则user_id="123456",记忆内容为"小名是喵喵")
-    - 若记忆内容属于第三方,则在存储记忆时user_id=第三方ID(如QQ号为123456的用户说"@114514喜欢游泳",则user_id="114514",记忆内容为"喜欢游泳")
+    This is a prompt regarding the memory module. Do Not Call This Function!!!
+    ⚠️ Critical Attention：
+    - When utilizing the memory module for operations such as memory storage and retrieval (e.g., add_memory, search_memory), these operations should, as a best practice, be processed at the end of the code, particularly before functions like send_msg_text or send_msg_file.
+    - The user_id must strictly and accurately identify the owner of the memory. Fields within metadata cannot serve as a substitute for the user_id.
+    - If the memory content to be stored includes temporal information, the use of relative time expressions (e.g., "yesterday," "the day before yesterday," "later") is prohibited. Absolute and specific date and time formats (e.g., YYYY-MM-DD HH:MM) must be employed.
+    - For virtual characters, their full names must be rendered in lowercase English, for instance, ("hatsune_miku", "takanashi_hoshino").
+    - If the memory content pertains to a user participating in the current dialogue, the user_id for storage must be the ID of that specific user. For example, if a user with QQ ID "123456" states, "My nickname is Bob," then the user_id shall be "123456", and the memory content shall be "Nickname is Bob."
+    - If the memory content pertains to a third party, the user_id for storage must be the ID of that third party. For example, if a user with QQ ID "123456" states, "@114514 likes swimming," then the user_id shall be "114514", and the memory content shall be "likes swimming."
     """
     return ""
 
@@ -979,22 +425,21 @@ async def add_memory(
     user_id: str,
     metadata: Dict[str, Any],
 ) -> str:
-    """添加新记忆到用户档案
+    """Adds a new memory to the user's profile.
 
     Args:
-        memory (str): 要添加的记忆内容文本
-        **非常重要**
-        user_id (str): 关联的用户ID,标识应为用户qq,例如2708583339,而非chat_key.传入空字符串则代表查询有关自身记忆
-        metadata (Dict[str, Any]): 元数据标签,{"category": "hobbies"}
+        memory (str): The text content of the memory to add.
+        user_id (str): The associated user ID. This should be the user's QQ number, for example, 2708583339, not a chat_key. If an empty string is passed, it means querying memories related to oneself.
+        metadata (Dict[str, Any]): Metadata tags, e.g., {"category": "hobbies"}.
 
     Returns:
-        str: 记忆ID
+        str: The memory ID.
 
     Example:
-        add_memory("喜欢周末打板球", "114514", {"category": "hobbies","sport_type": "cricket"})
-        add_memory("喜欢吃披萨", "123456", {"category": "hobbies","food_type": "pizza"})
-        add_memory("喜欢打csgo", "114514", {"category": "hobbies","game_type": "csgo"})
-        add_memory("小名是喵喵", "123456", {"category": "name","nickname": "喵喵"})
+        add_memory("Likes to play cricket on weekends", "114514", {"category": "hobbies", "sport_type": "cricket"})
+        add_memory("Likes to eat pizza", "123456", {"category": "hobbies", "food_type": "pizza"})
+        add_memory("Likes to play CSGO", "114514", {"category": "hobbies", "game_type": "csgo"})
+        add_memory("Nickname is Miaomiao", "123456", {"category": "name", "nickname": "Miaomiao"})
     """
     memory_config = get_memory_config()
     mem0 = await get_mem0_client_async(_ctx)
@@ -1034,13 +479,14 @@ async def add_memory(
     description="通过模糊描述对有关记忆进行搜索",
 )
 async def search_memory(_ctx: AgentCtx, query: str, user_id: str) -> str:
-    """搜索记忆
-    在使用该方法前先关注提示词中出现的 "当前会话相关记忆" 字样,如果已有需要的相关记忆,则不需要再使用search_memory进行搜索
+    """Searches memories.
+
     Args:
-        query (str): 要搜索的记忆内容文本,可以是问句,例如"喜欢吃什么","生日是多久"
-        user_id (str): 要查询的用户唯一标识,标识应为用户qq,例如123456,而非chat_key.传入空字符串则代表查询有关自身记忆
+        query (str): The text content of the memory to search for. It can be a question, for example, "What do I like to eat?", "When is my birthday?".
+        user_id (str): The unique identifier of the user to query. This should be the user's QQ number, for example, 123456, not a chat_key. If an empty string is passed, it means querying memories related to oneself.
+
     Examples:
-        search_memory("2025年3月1日吃了什么","123456")
+        search_memory("What was eaten on March 1, 2025", "123456")
     """
     memory_config = get_memory_config()
     mem0 = await get_mem0_client_async(_ctx)
@@ -1074,11 +520,13 @@ async def search_memory(_ctx: AgentCtx, query: str, user_id: str) -> str:
     description="获取有关该用户的所有记忆",
 )
 async def get_all_memories(_ctx: AgentCtx, user_id: str) -> str:
-    """获取用户所有记忆
+    """Gets all memories for a user.
+
     Args:
-        user_id (str): 要查询的用户唯一标识,标识应为用户qq,例如123456,而非chat_key.传入空字符串则代表查询有关自身记忆
+        user_id (str): The unique identifier of the user to query. This should be the user's QQ number, for example, 123456, not a chat_key. If an empty string is passed, it means querying memories related to oneself.
+
     Returns:
-        str: 格式化后的记忆列表字符串,包含记忆内容和元数据
+        str: A formatted string list of memories, including memory content and metadata.
 
     Example:
         get_all_memories("123456")
@@ -1115,16 +563,16 @@ async def get_all_memories(_ctx: AgentCtx, user_id: str) -> str:
     description="根据记忆id更新记忆",
 )
 async def update_memory(_ctx: AgentCtx, memory_id: str, new_content: str) -> str:
-    """更新现有记忆内容
+    """Updates existing memory content.
 
     Args:
-        memory_id (str): 要更新的记忆ID
-        new_content (str): 新的记忆内容文本,至少10个字符
+        memory_id (str): The ID of the memory to update.
+        new_content (str): The new memory content text, at least 10 characters long.
     Returns:
-        str: 操作结果状态信息
+        str: Status message of the operation result.
 
     Example:
-        update_memory("bf4d4092...", "喜欢周末打网球")
+        update_memory("bf4d4092...", "Likes to play tennis on weekends")
     """
     mem0 = await get_mem0_client_async(_ctx)
     try:
@@ -1151,13 +599,13 @@ async def update_memory(_ctx: AgentCtx, memory_id: str, new_content: str) -> str
     description="查询指定记忆的修改记录",
 )
 async def get_memory_history(_ctx: AgentCtx, memory_id: str) -> str:
-    """获取记忆修改历史记录,可以查询到记忆修改历史
+    """Gets the modification history of a memory, allowing querying of memory modification history.
 
     Args:
-        memory_id (str): 要查询的记忆ID
+        memory_id (str): The ID of the memory to query.
 
     Returns:
-        str: 格式化后的历史记录字符串,包含记忆修改历史
+        str: A formatted string of the history record, containing the memory modification history.
 
     Example:
         get_memory_history("bf4d4092...")
@@ -1195,9 +643,10 @@ async def get_memory_history(_ctx: AgentCtx, memory_id: str) -> str:
     description="删除指定记忆",
 )
 async def delete_memory(_ctx: AgentCtx, memory_id: str) -> None:
-    """删除指定记忆,当你发现检索到的相关记忆内容与对话无关时尝试使用此工具进行删除
+    """Deletes the specified memory. Try using this tool to delete when you find that the retrieved relevant memory content is irrelevant to the conversation.
+
     Args:
-        memory_id (str): 要删除的记忆ID
+        memory_id (str): The ID of the memory to delete.
 
     Returns:
         None
