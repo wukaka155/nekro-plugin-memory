@@ -62,7 +62,7 @@ def _filter_by_tags(items: List[Dict[str, Any]], tags: Optional[List[str]] = Non
             continue
             
         # Check if any of the requested tags match the item's metadata
-        item_type = _safe_get(metadata, "type", "")
+        item_type = _safe_get(metadata, "TYPE", "")
         if item_type in tags:
             filtered_items.append(item)
     
