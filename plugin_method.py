@@ -421,10 +421,15 @@ async def inject_memory_prompt(_ctx: AgentCtx) -> str:
         for uid in user_id_list:
             try:
                 mem_text = await get_all_memory(_ctx, uid, ["FACTS","TRAITS","RELATIONSHIPS"])
+                if "(无结果)" in mem_text:
+                    continue
                 memory_context += f"{mem_text}\n"
                 logger.info(f"为用户 {uid} 注入记忆:\n{mem_text}")
             except Exception as e:
                 logger.error(f"获取用户 {uid} 记忆失败: {e}")
+        
+        if not memory_context.strip():
+            memory_context = "预搜索结果为空"
     
     PROMPT = f"""
     This is a plugin for memory management. You can use it to store and retrieve memory information related to users.
