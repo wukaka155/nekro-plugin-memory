@@ -70,7 +70,7 @@ async def create_mem0_config() -> MemoryConfig:
                 "embedding_dims": memory_config.TEXT_EMBEDDING_DIMENSION,
             },
         ),
-        version="v1.1",
+        version="v1.15.4",
     )
 
 def _config_incomplete() -> bool:
