@@ -73,6 +73,7 @@ async def create_mem0_config() -> MemoryConfig:
             },
         ),
         version="v1.1",
+        check_version=False,
     )
 
 
