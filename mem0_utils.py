@@ -44,6 +44,7 @@ async def create_mem0_config() -> MemoryConfig:
     llm_base_url = _fallback(llm_model.BASE_URL)
     embedder_model_name = _fallback(embedding_model.CHAT_MODEL)
     embedder_base_url = _fallback(embedding_model.BASE_URL)
+    logger.error(f'qdrand_config${qdrant_config.api_key}')
     return MemoryConfig(
         vector_store=VectorStoreConfig(
             provider="qdrant",
@@ -52,6 +53,7 @@ async def create_mem0_config() -> MemoryConfig:
                 "api_key": qdrant_config.api_key,
                 "collection_name": plugin.get_vector_collection_name(),
                 "embedding_model_dims": memory_config.TEXT_EMBEDDING_DIMENSION,
+                "check_version": False
             },
         ),
         llm=LlmConfig(
@@ -73,7 +75,6 @@ async def create_mem0_config() -> MemoryConfig:
             },
         ),
         version="v1.1",
-        check_version=False,
     )
 
 
