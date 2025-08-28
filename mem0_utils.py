@@ -113,8 +113,8 @@ async def get_mem0_client() -> Optional[AsyncMemory]:
 
     # 使用原始可序列化字段构建稳定指纹，避免直接哈希模型对象
     plugin_cfg: PluginConfig = get_memory_config()
-    logger.error(f'qdrant_config::${qdrant_cfg.api_key}')
     qdrant_cfg = get_qdrant_config()
+    logger.error(f'qdrant_config::${qdrant_cfg.api_key}')
     llm_model = get_model_group_info(plugin_cfg.MEMORY_MANAGE_MODEL)
     embedding_model = get_model_group_info(plugin_cfg.TEXT_EMBEDDING_MODEL)
     collection_name = plugin.get_vector_collection_name()
