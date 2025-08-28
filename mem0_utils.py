@@ -30,6 +30,7 @@ async def create_mem0_client(config: MemoryConfig) -> AsyncMemory:
 async def create_mem0_config() -> MemoryConfig:
     # 创建mem0配置实例
     qdrant_config = get_qdrant_config()
+    logger.error(f'qdrant_config::${qdrant_config.api_key}')
     memory_config: PluginConfig = get_memory_config()
     llm_model = get_model_group_info(memory_config.MEMORY_MANAGE_MODEL)
     embedding_model = get_model_group_info(memory_config.TEXT_EMBEDDING_MODEL)
@@ -111,6 +112,7 @@ async def get_mem0_client() -> Optional[AsyncMemory]:
 
     # 使用原始可序列化字段构建稳定指纹，避免直接哈希模型对象
     plugin_cfg: PluginConfig = get_memory_config()
+    logger.error(f'qdrant_config::${qdrant_cfg.api_key}')
     qdrant_cfg = get_qdrant_config()
     llm_model = get_model_group_info(plugin_cfg.MEMORY_MANAGE_MODEL)
     embedding_model = get_model_group_info(plugin_cfg.TEXT_EMBEDDING_MODEL)
@@ -129,7 +131,6 @@ async def get_mem0_client() -> Optional[AsyncMemory]:
         str(embedding_model.BASE_URL or ""),
     )
     current_hash = hash("|".join(fingerprint_parts))
-    logger.error(f'qdrant_config::${qdrant_cfg.api_key}')
 
     # 如果配置变了或者实例不存在，重新初始化（并发保护）
     if _mem0_instance is None or current_hash != _last_config_hash:
