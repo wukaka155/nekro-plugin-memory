@@ -31,6 +31,7 @@ async def create_mem0_config() -> MemoryConfig:
     # 创建mem0配置实例
     qdrant_config = get_qdrant_config()
     logger.error(f'qdrant_config::${qdrant_config.api_key}')
+    print(f'qdrant_config::${qdrant_config.api_key}')
     memory_config: PluginConfig = get_memory_config()
     llm_model = get_model_group_info(memory_config.MEMORY_MANAGE_MODEL)
     embedding_model = get_model_group_info(memory_config.TEXT_EMBEDDING_MODEL)
