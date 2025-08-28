@@ -21,10 +21,11 @@ from .utils import get_model_group_info, get_preset_id
 
 _mem0_lock: asyncio.Lock = asyncio.Lock()
 
+
 async def create_mem0_client(config: MemoryConfig) -> AsyncMemory:
-    logger.info(config)
     # 创建mem0实例
     return AsyncMemory(config)
+
 
 async def create_mem0_config() -> MemoryConfig:
     # 创建mem0配置实例
@@ -71,8 +72,9 @@ async def create_mem0_config() -> MemoryConfig:
                 "embedding_dims": memory_config.TEXT_EMBEDDING_DIMENSION,
             },
         ),
-        version="v1.15.4",
+        version="v1.1",
     )
+
 
 def _config_incomplete() -> bool:
     """检测插件配置是否完整，若 API_KEY / MODEL / BASE_URL 任何一项为空则判定为不完整。"""
