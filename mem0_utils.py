@@ -44,7 +44,6 @@ async def create_mem0_config() -> MemoryConfig:
     llm_base_url = _fallback(llm_model.BASE_URL)
     embedder_model_name = _fallback(embedding_model.CHAT_MODEL)
     embedder_base_url = _fallback(embedding_model.BASE_URL)
-    logger.error(f'qdrand_config${qdrant_config.api_key}')
     return MemoryConfig(
         vector_store=VectorStoreConfig(
             provider="qdrant",
@@ -130,6 +129,7 @@ async def get_mem0_client() -> Optional[AsyncMemory]:
         str(embedding_model.BASE_URL or ""),
     )
     current_hash = hash("|".join(fingerprint_parts))
+    logger.error(f'qdrant_config::${qdrant_cfg.api_key}')
 
     # 如果配置变了或者实例不存在，重新初始化（并发保护）
     if _mem0_instance is None or current_hash != _last_config_hash:
