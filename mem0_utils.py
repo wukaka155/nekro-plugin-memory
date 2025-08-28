@@ -22,6 +22,7 @@ from .utils import get_model_group_info, get_preset_id
 _mem0_lock: asyncio.Lock = asyncio.Lock()
 
 async def create_mem0_client(config: MemoryConfig) -> AsyncMemory:
+    logger.info(config)
     # 创建mem0实例
     return AsyncMemory(config)
 
